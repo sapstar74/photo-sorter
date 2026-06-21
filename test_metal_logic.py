@@ -1723,6 +1723,31 @@ def test_step3_first_and_mid_segment_names_survive_rebuild() -> None:
         )
 
 
+def test_step3_no_segments_notice_messages() -> None:
+    """0 TAG/mappa szegmens esetén a 3. lépés egyértelmű, mód-tudatos útmutatót ad (nem 'forrásmappa')."""
+    from organizer_metal_app import step3_no_segments_notice
+
+    # Vannak határoló-sorok, de nincs szegmens → 'error' + helyreállítási lépések.
+    kind, msg = step3_no_segments_notice(has_delimiter_rows=True, upload_mode=True)
+    assert kind == "error"
+    assert "Nincs egyetlen TAG/mappa szegmens sem" in msg
+    assert "küszöb" in msg  # pHash/aHash küszöb csökkentése
+    assert "2 — Határolók" in msg  # demóciós helyreállítás
+    # Feltöltés-módban NEM utalunk helyi forrásmappára mint hibára/teendőre.
+    assert "ellenőrizd a forrásmappát" not in msg
+    assert "Feltöltés-mód" in msg
+
+    # Helyi mód: ugyanaz a lényeg, de a feltöltés-specifikus zárójeles megjegyzés nélkül.
+    kind_l, msg_l = step3_no_segments_notice(has_delimiter_rows=True, upload_mode=False)
+    assert kind_l == "error"
+    assert "Feltöltés-mód" not in msg_l
+
+    # Nincs határoló-sor sem → 'info', a kiindulási tervre irányít.
+    kind2, msg2 = step3_no_segments_notice(has_delimiter_rows=False, upload_mode=True)
+    assert kind2 == "info"
+    assert "1 — Kiindulás" in msg2
+
+
 def test_write_uploaded_media_to_dir_preserves_names_and_order() -> None:
     """Feltöltés-mód adapter: a (név, bájtok) párokat temp mappába írja, a pipeline rendezhető."""
     from metal_batch_logic import write_uploaded_media_to_dir, list_sorted_media
@@ -1810,6 +1835,7 @@ if __name__ == "__main__":
     test_step3_first_and_mid_segment_names_survive_rebuild()
     test_safe_image_display_helpers()
     test_sanitize_delimiter_preview_rows()
+    test_step3_no_segments_notice_messages()
     test_write_uploaded_media_to_dir_preserves_names_and_order()
     test_write_uploaded_media_to_dir_resolves_name_collisions()
     print("OK — minden teszt sikeres")

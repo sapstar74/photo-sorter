@@ -2591,6 +2591,44 @@ def _fragment_step3_unmatched_tag_editor(plan: OrganizePlan, si: int) -> None:
         st.caption(f"OCR (tipp, nem mappanév): `{html.escape(ocr_hint[:60])}`")
 
 
+def step3_no_segments_notice(
+    *, has_delimiter_rows: bool, upload_mode: bool
+) -> tuple[str, str]:
+    """
+    Üzenet, ha a tervben **nincs egyetlen TAG/mappa szegmens sem**, így nincs mit elnevezni
+    (ezért hiányoznak a mappanév-mezők). A leggyakoribb ok: a jelenlegi pHash-küszöbbel **minden
+    (vagy szinte minden) kép határolónak minősült**, ezért nincs „lap”/fotó, ami mappát nyitna.
+
+    Vissza: ``(kind, message)`` ahol ``kind`` ∈ {"error", "info"}.
+    """
+    if not has_delimiter_rows:
+        return (
+            "info",
+            "Nincs megjeleníthető TAG/mappa szegmens. Készíts kiindulási tervet az "
+            "**1 — Kiindulás** lapon (tölts fel/adj meg forrást és határoló referenciát).",
+        )
+    demote_hint = (
+        "a **2 — Határolók** lapon vedd ki a tévesen határolónak jelölt képeket "
+        "(**nem határoló** pipa), majd itt a **Képek frissítése**, végül a "
+        "**4 — Terv véglegesítése** lapon **Terv újraszámolása**"
+    )
+    return (
+        "error",
+        "**Nincs egyetlen TAG/mappa szegmens sem**, ezért nincs mit elnevezni — emiatt hiányoznak "
+        "a mappanév-mezők. A jelenlegi **pHash / aHash küszöbbel minden (vagy szinte minden) kép "
+        "határolónak minősült**, így nincs olyan „lap”/fotó, ami mappát nyitna.\n\n"
+        "**Megoldás:**\n"
+        "- Az **1 — Kiindulás** lapon **csökkentsd** a *pHash / aHash küszöböt* (kisebb érték = "
+        "kevesebb kép lesz határoló), és **készítsd újra** a kiindulási tervet; **vagy**\n"
+        f"- {demote_hint}.\n\n"
+        + (
+            "_(Feltöltés-mód: nincs helyi forrásmappa — a fenti lépésekkel javítható.)_"
+            if upload_mode
+            else ""
+        ),
+    )
+
+
 def _render_step3_tag_mappa_forms(plan: OrganizePlan) -> None:
     """Soronként: határoló + követő miniatűr; TAG fragmentben; „Összes kép a mappában” expander."""
     preview_rows, _preview_note = get_step3_delimiter_preview_rows(plan)
@@ -2598,6 +2636,20 @@ def _render_step3_tag_mappa_forms(plan: OrganizePlan) -> None:
     file_index_map = _ordered_file_index_map(files_ord) if files_ord else None
     st.divider()
     n_prev = len(preview_rows)
+
+    # Ha a tervben nincs egyetlen TAG/mappa szegmens sem (jellemzően: minden kép határolónak
+    # minősült), akkor nincs mappanév-mező, amit kitölteni. A korábbi viselkedés egy sor
+    # félrevezető, „ellenőrizd a forrásmappát” típusú figyelmeztetést mutatott (felhő/feltöltés
+    # módban nincs is forrásmappa). Helyette EGY világos, mindkét módban érvényes útmutatót adunk.
+    if len(plan.segments) == 0:
+        kind, msg = step3_no_segments_notice(
+            has_delimiter_rows=bool(preview_rows), upload_mode=_is_upload_mode()
+        )
+        if kind == "error":
+            st.error(msg)
+        else:
+            st.info(msg)
+        return
     seg_ix_preview: list[int | None] = []
     for dix, (delim, followers) in enumerate(preview_rows):
         nd_next = preview_rows[dix + 1][0] if dix + 1 < n_prev else None
@@ -2697,10 +2749,21 @@ def _render_step3_tag_mappa_forms(plan: OrganizePlan) -> None:
                     "**Képek frissítése**, majd a **4 — Terv véglegesítése → Terv újraszámolása**."
                 )
             else:
-                st.warning(
-                    "Ehhez a határoló sorhoz nem található terv-szegmens (útvonal / sorrend eltérés). "
-                    "**4 — Terv véglegesítése → Terv újraszámolása**, vagy ellenőrizd a forrásmappát."
-                )
+                # A sorhoz tartozó szegmens (ha van) a fenti „Mappák … határoló nélkül”
+                # szakaszban kap nevet. Feltöltés-módban NINCS helyi forrásmappa, ezért nem
+                # arra utalunk, hanem a tényleges helyreállítási lépésekre.
+                if _is_upload_mode():
+                    st.warning(
+                        "Ehhez a határoló sorhoz nem párosítható külön terv-szegmens (sorrend eltérés). "
+                        "A nevét — ha van hozzá szegmens — a fenti **„Mappák … határoló nélkül”** "
+                        "szakaszban add meg; szükség esetén a **4 — Terv véglegesítése → Terv újraszámolása**."
+                    )
+                else:
+                    st.warning(
+                        "Ehhez a határoló sorhoz nem párosítható külön terv-szegmens (útvonal / sorrend eltérés). "
+                        "A nevét a fenti **„Mappák … határoló nélkül”** szakaszban add meg; "
+                        "szükség esetén a **4 — Terv véglegesítése → Terv újraszámolása**, vagy ellenőrizd a forrásmappát."
+                    )
 
 
 def _render_step3_tag_mappa(plan: OrganizePlan) -> None:

@@ -2,6 +2,8 @@
 
 Streamlit kisalkalmazás: egy mappa képeit gyorsan szétválogathatod előnézettel — másolás vagy áthelyezés egy vagy több célmappába (kategóriák).
 
+> **Online / Deploy:** lásd a [Deploy — Streamlit Community Cloud](#deploy--streamlit-community-cloud-online) szakaszt a README alján. Repó: `github.com/sapstar74/photo-sorter`, belépési pont: `organizer_metal_app.py`.
+
 ## Telepítés
 
 ```bash
@@ -108,4 +110,39 @@ Böngésző: **http://127.0.0.1:8510**
 ### macOS: „Operation not permitted” a Documents mappánál
 
 Ha a forrás a `Documents` alatt van és **PermissionError** / „Operation not permitted” jelenik meg: a Streamlitet futtató appnak (Terminal / Cursor) adj **Teljes lemezhez való hozzáférést** a Rendszerbeállítások → Adatvédelem és biztonság menüben, vagy használj olyan forrásmappát, amit az app sandbox nélkül olvas (pl. a projekt alatti tesztmappa).
+
+---
+
+## Deploy — Streamlit Community Cloud (online)
+
+Az alkalmazás publikus telepítésre kész a **Streamlit Community Cloudon**.
+
+- **Repó:** `github.com/sapstar74/photo-sorter` (publikus), ág: `main`.
+- **Belépési pont (main file):** `organizer_metal_app.py`.
+- **Python függőségek:** `requirements.txt` (a `pytest` külön a `requirements-dev.txt`-ben, nem kerül a futtatásba).
+- **Rendszercsomagok:** `packages.txt` — a Streamlit Cloud `apt`-tal telepíti. Tartalma: `tesseract-ocr`, `tesseract-ocr-hun`, `tesseract-ocr-eng` (a `pytesseract` ezt a rendszer-binárist hívja, magyar + angol nyelvvel), valamint `libgl1` és `libglib2.0-0` (az OpenCV / Pillow képkezeléshez).
+- **Konfiguráció:** `.streamlit/config.toml` — a fix `8510` port csak helyi futtatáskor él (a felhő felülírja); a `headless = true` biztonságos felhős futáshoz.
+
+### Helyi mappa vs. Képek feltöltése (felhő-mód)
+
+A felhőben az app **nem** fér hozzá a géped lemezéhez és nem tud Findert/zenityt nyitni. Ezért a felület tetején **Bemenet módja** választó van:
+
+- **Helyi mappa** *(asztali használat)*: a megszokott folyamat — forrás/cél mappa útvonala + **Tallózás**; a fájlok **helyben** mozognak/másolódnak. Natív tallózás hiányában a gombok no-opok (figyelmeztetés jelenik meg).
+- **Képek feltöltése** *(felhő / headless — itt az alapértelmezett)*: feltöltöd a képeket és PDF-eket (`st.file_uploader`), ezek egy szerveroldali **ideiglenes mappába** kerülnek (a fájlnév adja a feldolgozási sorrendet). Ugyanaz a `metal_batch_logic` pipeline fut (`build_plan` → 5 lépéses varázsló → `execute_plan`), csak a kimenet egy **ideiglenes mappába** épül, amit a végén **ZIP-ként letöltesz** (`st.download_button`). Helyi fájl nem mozdul.
+
+A mód automatikusan **feltöltésre** vált, ha nincs natív tallózó (felhő/headless). Felülbírálható a `PHOTO_SORTER_INPUT_MODE` környezeti változóval (`upload` / `local`), vagy a felületi választóval.
+
+### Telepítés a Streamlit Community Cloudon (kézi lépések)
+
+A Streamlit Cloudnak **nincs CLI-je** — a deploy a böngészőből történik:
+
+1. Menj a [share.streamlit.io](https://share.streamlit.io) oldalra, és jelentkezz be a **GitHub** fiókkal (`sapstar74`).
+2. **Create app** → **Deploy a public app from GitHub**.
+3. Add meg pontosan:
+   - **Repository:** `sapstar74/photo-sorter`
+   - **Branch:** `main`
+   - **Main file path:** `organizer_metal_app.py`
+4. **Deploy** — az első build telepíti a `packages.txt` (apt) és `requirements.txt` (pip) csomagjait; ez néhány percig tarthat (a Tesseract miatt).
+
+Build után az app az upload-módban fut: a felhasználó feltölti a képeket + a határoló referenciát, és a végén ZIP-et tölt le.
 

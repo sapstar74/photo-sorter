@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# Virtuális környezet
+.venv/
+venv/
+.env
+
+# OS
+.DS_Store
+*.log
+
+# Streamlit titkok (sosem kerüljön repóba)
+.streamlit/secrets.toml
+
+# Helyi teszt fotók / kimenet (ne kerüljön a repóba)
+test_photos/
+test_images/
+sample_photos/
+output/
+szétválogatva/
+rendezett_mappak.zip

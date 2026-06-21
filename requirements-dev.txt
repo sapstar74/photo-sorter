@@ -1,0 +1,3 @@
+# Fejlesztői / teszt függőségek (NEM kell a Streamlit Cloud futtatáshoz).
+-r requirements.txt
+pytest>=8.0.0

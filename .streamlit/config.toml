@@ -1,7 +1,6 @@
 [server]
-# A fix port/cím csak helyi futtatáskor érvényes; a Streamlit Community Cloud felülírja.
-port = 8510
-address = "127.0.0.1"
+# Ne kösse meg a portot/címet: a Streamlit Community Cloud a 8501-es porton ellenőrzi az appot.
+# Helyi futtatáskor adható: streamlit run ... --server.port 8510
 headless = true
 
 [browser]

@@ -2920,48 +2920,63 @@ def _distinct_folder_names_with_counts(names: list[str]) -> list[tuple[str, int]
     return [(nm, counts[nm]) for nm in order]
 
 
-def _resolve_execution_plan_for_preview() -> OrganizePlan | None:
+def _live_tag_by_segment_from_plan(prepared: OrganizePlan) -> dict[str, str]:
+    """
+    A JELENLEGI (élő) kézi mappanév-térkép a már feldolgozott tervből (widget + stabil mentés
+    egyesítve). A ``build_approved_folder_names`` ``tag_by_segment`` paramétere a kézi nevek
+    egyetlen megbízható forrása; az előnézet **persist=False** miatt a session-snapshot ott
+    elavult lehet, ezért a ``prepared`` tervből számoljuk újra (mellékhatás nélkül), így az
+    előnézet a **most beírt** neveket mutatja, nem egy korábbit.
+    """
+    try:
+        pr, _ = get_step3_delimiter_preview_rows(prepared)
+        fo = _get_step3_ordered_media_files(prepared)
+        _by_d, _by_p, by_segment = snapshot_step3_tag_overrides_from_plan(prepared, pr, fo)
+        return by_segment
+    except Exception:
+        return st.session_state.get(_STEP3_TAGS_BY_SEGMENT_KEY) or {}
+
+
+def _resolve_execution_plan_for_preview() -> tuple[OrganizePlan, dict[str, str]] | None:
     """
     Mellékhatás nélkül előállítja a végrehajtási tervet (a jóváhagyott nevek előnézetéhez):
     3. lépés nevek alkalmazása → szegmens-kiválasztás. NEM ír session-állapotot.
+    Vissza: (terv, élő kézi-név térkép) — a térképet a ``build_approved_folder_names``-hez.
     """
     plan0 = st.session_state.get("_plan")
     if not isinstance(plan0, OrganizePlan):
         return None
+    # ``_apply_ocr_edits_to_plan`` MÁR egyesíti az élő 3. lépés mezőket (widget) és a stabil
+    # mentést (``pick_step3_tag_for_segment`` a widgetet preferálja). NE alkalmazzunk rá egy
+    # második, ÜRES widgetű + csak-snapshot menetet: az felülírná a frissen beírt neveket egy
+    # esetleg üres / korábbi (stale) snapshot-értékkel (előnézet persist=False → a snapshot
+    # nem frissül, így a régi érték „ragadna be”).
     prepared = _apply_ocr_edits_to_plan(plan0, persist=False)
-    prepared = apply_step3_tag_edits_to_plan(
-        prepared,
-        tag_by_dix={},
-        tag_by_seg={},
-        preview_rows=[],
-        files_ord=None,
-        tag_by_delim={},
-        tag_by_plate={},
-        tag_by_segment=st.session_state.get(_STEP3_TAGS_BY_SEGMENT_KEY) or {},
-    )
+    live_by_segment = _live_tag_by_segment_from_plan(prepared)
     try:
         prepared.segments = select_execution_segments(
             prepared,
-            tag_by_segment=st.session_state.get(_STEP3_TAGS_BY_SEGMENT_KEY) or {},
+            tag_by_segment=live_by_segment,
             original_ocr_by_plate=_original_ocr_by_plate_from_cache(),
             drop_unedited_delimiterless=False,
         )
     except Exception:
         pass
-    return prepared
+    return prepared, live_by_segment
 
 
 def _render_step5_approved_folder_names_preview() -> None:
     """A létrehozandó mappák (jóváhagyott nevek) átlátható listája a végrehajtás előtt."""
     try:
-        prepared = _resolve_execution_plan_for_preview()
+        resolved = _resolve_execution_plan_for_preview()
     except Exception:
-        prepared = None
-    if prepared is None:
+        resolved = None
+    if resolved is None:
         return
+    prepared, live_by_segment = resolved
     names = build_approved_folder_names(
         prepared,
-        tag_by_segment=st.session_state.get(_STEP3_TAGS_BY_SEGMENT_KEY) or {},
+        tag_by_segment=live_by_segment,
     )
     distinct = _distinct_folder_names_with_counts(names)
     with st.expander(f"Létrehozandó mappák előnézete — {len(distinct)} mappa", expanded=True):
@@ -3004,18 +3019,11 @@ def _render_step5_execute_block() -> None:
 
             exec_bar.progress(0.03, text="Előkészítés: TAG/mappa nevek alkalmazása…")
             exec_status.caption("Előkészítés: TAG/mappa nevek alkalmazása…")
+            # ``_apply_ocr_edits_to_plan`` egyesíti az élő 3. lépés mezőket és a stabil mentést
+            # (a widget nyer), és persist=True-val frissíti is a snapshotot. NE alkalmazzunk rá
+            # egy második, üres widgetű + csak-snapshot menetet — az visszaírná a régi/üres
+            # snapshot-nevet a frissen beírt érték helyett.
             plan: OrganizePlan = _apply_ocr_edits_to_plan(st.session_state["_plan"])
-            plan = apply_step3_tag_edits_to_plan(
-                plan,
-                tag_by_dix={},
-                tag_by_seg={},
-                preview_rows=[],
-                files_ord=None,
-                tag_by_delim={},
-                tag_by_plate={},
-                tag_by_segment=st.session_state.get(_STEP3_TAGS_BY_SEGMENT_KEY) or {},
-            )
-            _persist_step3_tag_overrides(plan)
 
             exec_bar.progress(0.08, text="Előkészítés: kihagyások és cél beállítása…")
             exec_status.caption("Előkészítés: kihagyások és cél beállítása…")

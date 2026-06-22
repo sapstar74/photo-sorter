@@ -1383,6 +1383,94 @@ def test_untouched_segments_each_get_a_folder_real_flow() -> None:
         assert created == ["1", "3", "4-xx", "ALMA"], created  # mind a 4 mappa létrejön
 
 
+def test_step5_preview_uses_current_step3_name_over_stale_snapshot() -> None:
+    """
+    Gyökérok-regresszió: a felhasználó a 3. lépésben átírja a mappanevet, de a stabil mentésben
+    (``_STEP3_TAGS_BY_SEGMENT_KEY``) még egy KORÁBBI érték szerepel. Az 5. lépés előnézete
+    (``_resolve_execution_plan_for_preview`` → ``build_approved_folder_names``) a MOST beírt
+    nevet használja, nem a korábbit. Korábban a preview persist=False mellett a stale snapshotot
+    (vagy a sorszám-alapértelmezést) mutatta — pont a bejelentett „régi érték ragad be” hiba.
+    """
+    import imagehash
+    from PIL import Image
+    import organizer_metal_app as app_mod
+    from organizer_metal_app import (
+        _resolve_execution_plan_for_preview,
+        build_approved_folder_names,
+        _apply_ocr_edits_to_plan,
+        _segment_identity_keys,
+        _STEP3_TAGS_BY_SEGMENT_KEY,
+        _STEP3_TAGS_BY_DELIM_KEY,
+        _STEP3_TAGS_BY_PLATE_KEY,
+    )
+    from metal_batch_logic import OrganizePlan, Segment, PlanScanCache
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+
+        def mk(n: str) -> Path:
+            p = root / n
+            Image.new("RGB", (8, 8), (120, 200, 50)).save(p)
+            return p
+
+        # layout: d1 pA d2 pB  -> segA határolóval lezárt; segB záró, határoló nélküli
+        d1, pA, d2, pB = mk("01_d1.jpg"), mk("02_pA.jpg"), mk("03_d2.jpg"), mk("04_pB.jpg")
+        files = [d1, pA, d2, pB]
+        ref = imagehash.hex_to_hash("0000000000000000")
+
+        plan = OrganizePlan(
+            segments=[
+                Segment(folder_key="OCR_A", plate_image=pA, ocr_raw="OCR_A", photos=[pA], closed_by_delimiter=d2),
+                Segment(folder_key="OCR_B", plate_image=pB, ocr_raw="OCR_B", photos=[pB], closed_by_delimiter=None),
+            ],
+            delimiter_hits=[d1, d2],
+        )
+        cache = PlanScanCache(
+            files=list(files), hash_by_path={}, ref_phash=ref, ref_ahash=ref,
+            max_hamming=18, inner_ratio=0.92, source_str=str(root.expanduser()),
+            recursive=False, image_count=4, files_sorted_by_name_mtime=True,
+            ocr_by_path={}, delimiter_candidates={str(d1.expanduser()), str(d2.expanduser())},
+        )
+
+        # STALE mentés: segB-hez egy KORÁBBI „KV49752” név (mint egy előző körből).
+        stale = {}
+        for sid in _segment_identity_keys(plan.segments[1]):
+            stale[sid] = "KV49752"
+
+        app_mod.st.session_state = {  # type: ignore[assignment]
+            "_plan": plan, "_src": str(root),
+            "metal_recursive_chk": False, "_recursive": False,
+            "metal_max_hamming": 18, "metal_del_inner": 0.92,
+            "_plan_scan_cache": cache,
+            "_forced_delimiter_paths": [], "_demoted_delimiter_paths": [],
+            "_plan_generation": 1,
+            _STEP3_TAGS_BY_SEGMENT_KEY: dict(stale),
+            _STEP3_TAGS_BY_DELIM_KEY: {}, _STEP3_TAGS_BY_PLATE_KEY: {},
+            # A felhasználó MOST a 3. lépés mezőkbe ÚJ neveket ír (a stale-től eltérőt).
+            "step3_tag_ocr_0": "ALMA",
+            "step3_tag_ocr_1": "KV99999",
+        }
+
+        # 5. lépés előnézet: a MOST beírt nevet kell mutatnia (NEM a stale „KV49752”-t).
+        resolved = _resolve_execution_plan_for_preview()
+        assert resolved is not None
+        prepared, live_by_segment = resolved
+        names = build_approved_folder_names(prepared, tag_by_segment=live_by_segment)
+        assert names == ["ALMA", "KV99999-xx"], names
+        assert "KV49752" not in " ".join(names)
+
+        # 5. lépés végrehajtás-előkészítés (persist=True): szintén a friss nevet használja,
+        # és a snapshotot felülírja az ÚJ értékre (a régi nem éled fel).
+        executed = _apply_ocr_edits_to_plan(app_mod.st.session_state["_plan"])
+        exec_names = build_approved_folder_names(
+            executed, tag_by_segment=app_mod.st.session_state.get(_STEP3_TAGS_BY_SEGMENT_KEY) or {}
+        )
+        assert exec_names == ["ALMA", "KV99999-xx"], exec_names
+        saved_values = set((app_mod.st.session_state.get(_STEP3_TAGS_BY_SEGMENT_KEY) or {}).values())
+        assert "KV49752" not in saved_values
+        assert "KV99999" in saved_values
+
+
 def test_plan_required_notice_shows_success_after_sort() -> None:
     """A sikeres válogatás után a lap-őr ne a félrevezető „készíts tervet” üzenetet adja."""
     import organizer_metal_app as app_mod
@@ -1824,6 +1912,7 @@ if __name__ == "__main__":
     test_delimiterless_segments_get_xx_marker()
     test_execution_includes_all_step3_segments_with_xx_and_merge()
     test_untouched_segments_each_get_a_folder_real_flow()
+    test_step5_preview_uses_current_step3_name_over_stale_snapshot()
     test_plan_required_notice_shows_success_after_sort()
     test_select_execution_segments_robust_to_missing_cache()
     test_step3_interval_between_delimiters()

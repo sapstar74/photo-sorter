@@ -436,6 +436,7 @@ def _clear_segment_ocr_widget_keys() -> None:
             or k.startswith("seg_map_folder_")
             or k.startswith("step3_tag_ocr_")
             or k.startswith("step3_map_folder_")
+            or k.startswith(_SEGMENT_NAME_WIDGET_PREFIX)
         ):
             del st.session_state[k]
 
@@ -1327,6 +1328,98 @@ def _segment_identity_keys(seg: Segment) -> list[str]:
         member_digest = hashlib.sha1("|".join(member_paths).encode("utf-8")).hexdigest()
         keys.append(f"members:{member_digest}")
     return keys
+
+
+# A megosztott (lépések közti) mappanév-szerkesztő widget-kulcsainak előtagja. A kulcs a
+# szegmens **identitásából** származik (nem a sorszámból / pozícióból), így a szerkesztés nem
+# szivárog át más mappára, és újrafuttatáskor / lapváltáskor stabil marad.
+_SEGMENT_NAME_WIDGET_PREFIX = "segname_"
+
+
+def _segment_identity_digest(seg: Segment) -> str:
+    """Stabil, rövid azonosító a szegmens identitásából (widget-kulcshoz)."""
+    ids = _segment_identity_keys(seg)
+    return hashlib.sha1("|".join(ids).encode("utf-8")).hexdigest()[:16]
+
+
+def _store_manual_name_for_segment(seg: Segment, store: dict[str, str] | None) -> str:
+    """A szegmenshez tartozó **kézi** mappanév a megosztott tárból (a ``-xx`` jelölő levágva)."""
+    if not isinstance(store, dict):
+        return ""
+    for sid in _segment_identity_keys(seg):
+        v = _normalize_tag_text(store.get(sid), "")
+        if v:
+            return _strip_delimiterless_marker(v)
+    return ""
+
+
+def _on_segment_name_input_change(
+    wkey: str, identity_keys: list[str], default_name: str
+) -> None:
+    """
+    A mappanév-mező ``on_change`` visszahívása: a **megosztott tárba** (``_STEP3_TAGS_BY_SEGMENT_KEY``)
+    írja a kézi nevet a szegmens minden identitás-kulcsára. Üres / az alapértelmezett sorszámmal
+    egyező érték esetén törli a felülírást (visszaesés az automatikus névre). A visszahívás a
+    rerun ELŐTT fut, így a tár mindig friss — a többi lépés (3/4/5) widgetjei innen szinkronizálnak.
+    """
+    typed = _normalize_tag_text(st.session_state.get(wkey), "")
+    clean = _strip_delimiterless_marker(typed)
+    store = st.session_state.get(_STEP3_TAGS_BY_SEGMENT_KEY)
+    if not isinstance(store, dict):
+        store = {}
+    if clean and clean != default_name:
+        for sid in identity_keys:
+            store[sid] = clean
+    else:
+        for sid in identity_keys:
+            store.pop(sid, None)
+    st.session_state[_STEP3_TAGS_BY_SEGMENT_KEY] = store
+
+
+def _render_shared_segment_name_input(
+    seg: Segment,
+    si: int,
+    *,
+    key_prefix: str,
+    label: str = "Mappa név",
+    label_visibility: str = "collapsed",
+    help_text: str | None = None,
+) -> str:
+    """
+    Egyetlen, **lépések közt megosztott** mappanév-szerkesztő mező egy szegmenshez.
+
+    A **megosztott tár** (``_STEP3_TAGS_BY_SEGMENT_KEY``) az egyetlen igazságforrás: a widget
+    minden futáskor a tárból szinkronizálja az értékét, így a 3., 4. és 5. lépésben ugyanahhoz a
+    mappához tartozó mezők mindig egyezőt mutatnak (szerkesztés bárhol → mindenhol látszik). Az
+    ``on_change`` visszahívás írja a tárat. A widget-kulcs a szegmens **identitásából** képződik
+    (``key_prefix`` előtaggal lépésenként eltér, hogy a 3./5. lépés mezője ne ütközzön).
+
+    Vissza: a **tényleges** (alkalmazandó) név (kézi, vagy az alapértelmezett sorszám).
+    """
+    ids = _segment_identity_keys(seg)
+    wkey = f"{_SEGMENT_NAME_WIDGET_PREFIX}{key_prefix}_{_segment_identity_digest(seg)}"
+    default_name = default_folder_name_for_segment(si)
+    store = st.session_state.get(_STEP3_TAGS_BY_SEGMENT_KEY)
+    if not isinstance(store, dict):
+        store = {}
+        st.session_state[_STEP3_TAGS_BY_SEGMENT_KEY] = store
+    manual = _store_manual_name_for_segment(seg, store)
+    desired = manual or default_name
+    # A tár nyer: a widgetet (a beírás UTÁN, a visszahívással frissített tárból) ráigazítjuk.
+    # Ez a beírt értéket sosem írja felül (akkor a tár == widget), csak a MÁSIK lépés mezőjét
+    # szinkronizálja — így nincs „stale snapshot felülírja a friss bevitelt” regresszió.
+    if st.session_state.get(wkey) != desired:
+        st.session_state[wkey] = desired
+    st.text_input(
+        label,
+        key=wkey,
+        label_visibility=label_visibility,
+        help=help_text,
+        on_change=_on_segment_name_input_change,
+        args=(wkey, ids, default_name),
+    )
+    typed = _normalize_tag_text(st.session_state.get(wkey), "")
+    return _strip_delimiterless_marker(typed) or default_name
 
 
 def pick_step3_tag_for_segment(
@@ -2553,35 +2646,32 @@ def _render_step3_tag_mappa_header_delimiter_preview(plan: OrganizePlan) -> None
 
 
 @st.fragment
-def _fragment_step3_tag_row_editor(plan: OrganizePlan, dix: int, si: int, delim: Path) -> None:
-    """Csak ez a sor fut újra TAG gépeléskor."""
+def _fragment_step3_segment_name_editor(plan: OrganizePlan, si: int) -> None:
+    """
+    Egy mappa (szegmens) neve — csak ez a mező fut újra gépeléskor (fragment). A **megosztott
+    tárba** ír (lépések közti egységes igazságforrás), így a 4. és 5. lépésbe is átszinkronizál.
+    """
     seg = plan.segments[si]
-    ko = f"step3_tag_ocr_{dix}"
-    default_name = default_folder_name_for_segment(si)
-    if ko not in st.session_state:
-        saved = (st.session_state.get(_STEP3_TAGS_BY_DELIM_KEY) or {}).get(_norm_path_str(delim))
-        if not saved:
-            by_segment = st.session_state.get(_STEP3_TAGS_BY_SEGMENT_KEY) or {}
-            if isinstance(by_segment, dict):
-                for sid in _segment_identity_keys(seg):
-                    saved = by_segment.get(sid)
-                    if saved:
-                        break
-        # Alapértelmezés = sorszám (NEM OCR). Kézi mentés esetén az nyer.
-        st.session_state[ko] = saved if saved else default_name
-    st.markdown("**TAG / mappa név**")
-    st.text_input(
-        "TAG / mappa név",
-        key=ko,
-        label_visibility="collapsed",
-        help="Alapértelmezés a sorszám; írd át tetszőleges névre. Tiltott karakterek a válogatáskor cserélve.",
+    has_delim = seg.closed_by_delimiter is not None
+    st.markdown("**Mappa név**")
+    eff = _render_shared_segment_name_input(
+        seg,
+        si,
+        key_prefix="s3",
+        help_text=(
+            "Alapértelmezés a sorszám; írd át tetszőleges névre — MINDEN mappa neve szerkeszthető "
+            "(a határoló nélküliek is). Tiltott karakterek a válogatáskor cserélve. Üres mező = "
+            "automatikus alapértelmezett név."
+        ),
     )
-    r1 = st.session_state.get(ko, default_name)
-    r1 = (r1 or "").strip() if isinstance(r1, str) else str(r1).strip()
-    tag_disp = r1 or default_name
-    st.caption(f"Mappa (fájlrendszer): `{safe_folder_name(tag_disp)}`")
+    st.caption(f"Mappa (fájlrendszer): `{safe_folder_name(eff)}`")
+    if not has_delim:
+        st.caption(
+            "Nincs határoló kép ehhez a mappához — a beírt név **pontosan** így lesz alkalmazva; "
+            "üresen hagyva automatikus `-xx` jelölésű sorszámot kap."
+        )
     ocr_hint = _normalize_tag_text(seg.ocr_raw, "")
-    if ocr_hint and ocr_hint != default_name:
+    if ocr_hint and ocr_hint != default_folder_name_for_segment(si):
         st.caption(f"OCR (tipp, nem mappanév): `{html.escape(ocr_hint[:60])}`")
 
 
@@ -2625,6 +2715,17 @@ def step3_no_segments_notice(
 
 def _render_step3_tag_mappa_forms(plan: OrganizePlan) -> None:
     """Soronként: határoló + követő miniatűr; TAG fragmentben; „Összes kép a mappában” expander."""
+    # A mappanév-szerkesztés most a **megosztott tárba** (identitás-alapú) ír. A korábbi, sor- /
+    # szegmens-index alapú widgetek (``step3_tag_ocr_*`` / ``seg_ocr_raw_*``) már nincsenek a UI-ban;
+    # ha egy korábbi (hot-reload előtti) menetből beragadtak, töröljük őket, hogy NE írhassák felül a
+    # frissen beírt nevet (a régi „stale widget nyer a tár felett” regresszió elkerülése).
+    for _legacy in [
+        k
+        for k in list(st.session_state.keys())
+        if isinstance(k, str)
+        and (k.startswith("step3_tag_ocr_") or k.startswith("seg_ocr_raw_"))
+    ]:
+        del st.session_state[_legacy]
     preview_rows, _preview_note = get_step3_delimiter_preview_rows(plan)
     files_ord = _get_step3_ordered_media_files(plan)
     file_index_map = _ordered_file_index_map(files_ord) if files_ord else None
@@ -2656,43 +2757,52 @@ def _render_step3_tag_mappa_forms(plan: OrganizePlan) -> None:
                 files_ordered=files_ord,
             )
         )
-    st.markdown("##### TAG / mappa szegmensek (minden határoló sorhoz külön bevitel)")
+    # Szegmens → az őt megjelenítő (első) határoló-sor. Így MINDEN mappához (szegmenshez) pontosan
+    # EGY szerkesztő tartozik — a határolóval lezártakhoz a határoló-sor előnézetével, a határoló
+    # nélküliekhez (lista eleji / párosítatlan) a fémlap + saját képeivel. Nincs külön szakasz.
+    row_for_si: dict[int, int] = {}
+    for dix, si in enumerate(seg_ix_preview):
+        if si is not None and si not in row_for_si:
+            row_for_si[si] = dix
+
+    st.markdown("##### TAG / mappa szegmensek — **minden mappa neve szerkeszthető**")
     st.caption(
-        f"**Határoló sorok** (felül): **{n_prev}** db. Minden blokkban **határoló + első követő** miniatűr, **TAG / mappa név**. "
+        f"**Mappák (szegmensek):** {len(plan.segments)} db; **határoló sorok** (felül): {n_prev} db. "
         "Az **alapértelmezett név a sorszám** (1, 2, 3, …) — írd át tetszőleges névre; OCR-szöveg csak tippként jelenik meg, sosem lesz mappanév. "
+        "**Minden mappa** átnevezhető — a határoló nélküli (lista eleji / párosítatlan / záró) mappák is. "
         "**Összes kép a mappában** = a jelen határoló után a következő határolóig tartó kép-sáv (a következő határoló kép nélkül). "
-        "A név szerkesztésekor csak a szövegmező fut újra. "
-        "Ha több blokk ugyanahhoz a terv-szegmenshez tartozik, a **Válogatás** (5. lépés) az **utolsó** kitöltött blokk szerinti értéket veszi át."
+        "A név szerkesztésekor csak a szövegmező fut újra; a beírt név a 4. és 5. lépésbe is átszinkronizál."
     )
-    # MEGJEGYZÉS: a korábbi „Mappák lezáró/megelőző határoló nélkül (a lista elején vagy végén)”
-    # szakaszt (a párosítatlan szegmensek kézi névmezőit) a felhasználó kérésére eltávolítottuk.
-    # A párosítatlan / határoló nélküli szegmensek továbbra is kapnak nevet: vagy a stabil (kézi)
-    # mentésből, vagy a sorszám-alapértelmezésből (+ ``-xx`` rendszerjelölő) — lásd
-    # ``apply_step3_tag_edits_to_plan`` és ``build_approved_folder_names``. Itt már csak a
-    # határoló-soros TAG/Mappa szerkesztők jelennek meg.
 
-    for dix, (delim, followers) in enumerate(preview_rows):
-        si = seg_ix_preview[dix]
-        if si is not None:
-            seg = plan.segments[si]
+    for si, seg in enumerate(plan.segments):
+        dix = row_for_si.get(si)
+        if dix is not None:
+            delim = preview_rows[dix][0]
+            st.markdown(
+                f"#### Mappa {si + 1} — határoló: `{html.escape(delim.name)}`",
+                unsafe_allow_html=True,
+            )
+            st.markdown(f"**Határoló** (határoló + első követő)")
+            thumbs = _tag_segment_anchor_thumbnails(dix, preview_rows)
+            captions = ["Határoló", "első követő"]
         else:
-            seg = None
+            st.markdown(
+                f"#### Mappa {si + 1} — *(nincs határoló kép)*",
+                unsafe_allow_html=True,
+            )
+            st.markdown("**Fémlap / első kép**")
+            thumbs = [
+                p
+                for p in ([seg.plate_image] + list(seg.photos[:1]))
+                if _path_image_file_ok(p)
+            ]
+            captions = ["fémlap", "első kép"]
 
-        st.markdown(
-            f"#### TAG/Mappa {dix + 1} — határoló: `{html.escape(delim.name)}`",
-            unsafe_allow_html=True,
-        )
-
-        st.markdown(f"**Határoló {dix + 1}** (határoló + első követő)")
-        thumbs = _tag_segment_anchor_thumbnails(dix, preview_rows)
         if thumbs:
             tc = st.columns(len(thumbs))
             for ci, p in enumerate(thumbs):
                 with tc[ci]:
-                    if ci == 0:
-                        cap = f"Határoló {dix + 1}"
-                    else:
-                        cap = "első követő"
+                    cap = captions[ci] if ci < len(captions) else p.name
                     if not _safe_st_image_path(
                         p,
                         caption=f"{cap}: {p.name}"[:56],
@@ -2701,10 +2811,10 @@ def _render_step3_tag_mappa_forms(plan: OrganizePlan) -> None:
                     ):
                         st.caption(str(p))
         else:
-            st.caption("Nincs előnézeti kép ehhez a sorhoz.")
+            st.caption("Nincs előnézeti kép ehhez a mappához.")
 
-        if seg is not None:
-            _fragment_step3_tag_row_editor(plan, dix, si, delim)
+        _fragment_step3_segment_name_editor(plan, si)
+        if dix is not None:
             _render_step3_folder_photos_expander(
                 seg,
                 dix=dix,
@@ -2713,29 +2823,7 @@ def _render_step3_tag_mappa_forms(plan: OrganizePlan) -> None:
                 index_map=file_index_map,
             )
         else:
-            dirty = bool(st.session_state.get("_delimiter_demotions_dirty"))
-            if dirty:
-                st.warning(
-                    "Ehhez a sorhoz a terv még a **régi** határoló-listára épül — a **3. lépésben** "
-                    "**Képek frissítése**, majd a **4 — Terv véglegesítése → Terv újraszámolása**."
-                )
-            else:
-                # A sorhoz nem párosítható terv-szegmens. A párosítatlan / határoló nélküli
-                # szegmensek automatikus (sorszám-alapú, ``-xx`` jelölős) nevet kapnak — kézi
-                # átnevezésük már nem itt történik. Feltöltés-módban NINCS helyi forrásmappa,
-                # ezért ott a tényleges helyreállítási lépésekre utalunk.
-                if _is_upload_mode():
-                    st.warning(
-                        "Ehhez a határoló sorhoz nem párosítható külön terv-szegmens (sorrend eltérés). "
-                        "Az érintett mappa automatikus, sorszám-alapú nevet kap; szükség esetén a "
-                        "**4 — Terv véglegesítése → Terv újraszámolása**."
-                    )
-                else:
-                    st.warning(
-                        "Ehhez a határoló sorhoz nem párosítható külön terv-szegmens (útvonal / sorrend eltérés). "
-                        "Az érintett mappa automatikus, sorszám-alapú nevet kap; szükség esetén a "
-                        "**4 — Terv véglegesítése → Terv újraszámolása**, vagy ellenőrizd a forrásmappát."
-                    )
+            _render_step3_folder_photos_expander(seg)
 
 
 def _render_step3_tag_mappa(plan: OrganizePlan) -> None:
@@ -2937,6 +3025,45 @@ def _resolve_execution_plan_for_preview() -> tuple[OrganizePlan, dict[str, str]]
     return prepared, live_by_segment
 
 
+def _render_step5_segment_name_editor(seg: Segment, si: int) -> None:
+    """Egy mappa neve az 5. lépésben — a **megosztott tárba** ír (ugyanaz, mint a 3./4. lépés)."""
+    eff = _render_shared_segment_name_input(
+        seg,
+        si,
+        key_prefix="s5",
+        label=f"Mappa {si + 1} neve",
+        label_visibility="visible",
+        help_text=(
+            "Itt a végrehajtás ELŐTT is átírható bármely mappa neve (a határoló nélküliek is). "
+            "A változás azonnal a tényleges másolásra/áthelyezésre érvényes, és visszaszinkronizál a 3. lépésbe."
+        ),
+    )
+    has_delim = seg.closed_by_delimiter is not None
+    suffix = "" if has_delim else "  *(határoló nélküli — üresen automatikus `-xx`)*"
+    st.caption(f"Mappa (fájlrendszer): `{safe_folder_name(eff)}`{suffix}")
+
+
+def _render_step5_editable_folder_names(prepared: OrganizePlan) -> None:
+    """
+    Szerkeszthető mappanév-mező **minden** célmappához, közvetlenül a végrehajtás előtt. A
+    megosztott tárba ír (3./4./5. lépés egységes igazságforrása), így a bevitt név érvényesül a
+    tényleges másolásra/áthelyezésre is, és bárhol szerkesztve mindenhol megjelenik.
+    """
+    if not prepared.segments:
+        return
+    with st.expander(
+        f"Mappanevek szerkesztése a végrehajtás előtt — {len(prepared.segments)} mappa",
+        expanded=False,
+    ):
+        st.caption(
+            "Bármely mappa neve itt is módosítható (a határoló nélkülieké is). Üres mező → automatikus "
+            "alapértelmezett (sorszám; határoló nélkül `-xx` jelölővel). **Azonos nevű mappák képei egy "
+            "közös mappába** kerülnek (összevonás)."
+        )
+        for si, seg in enumerate(prepared.segments):
+            _render_step5_segment_name_editor(seg, si)
+
+
 def _render_step5_approved_folder_names_preview() -> None:
     """A létrehozandó mappák (jóváhagyott nevek) átlátható listája a végrehajtás előtt."""
     try:
@@ -2946,6 +3073,7 @@ def _render_step5_approved_folder_names_preview() -> None:
     if resolved is None:
         return
     prepared, live_by_segment = resolved
+    _render_step5_editable_folder_names(prepared)
     names = build_approved_folder_names(
         prepared,
         tag_by_segment=live_by_segment,
@@ -2953,9 +3081,9 @@ def _render_step5_approved_folder_names_preview() -> None:
     distinct = _distinct_folder_names_with_counts(names)
     with st.expander(f"Létrehozandó mappák előnézete — {len(distinct)} mappa", expanded=True):
         st.caption(
-            "**Jóváhagyott mappanevek**: kézi név, ha a **3 — Mappanevek** lapon átírtad; egyébként "
-            "a **sorszám**. OCR-szöveg sosem lesz mappanév. **Azonos nevet adva több blokknak azok "
-            "képei EGY KÖZÖS mappába kerülnek** (összevonás); az eltérő nevek külön mappába."
+            "**Jóváhagyott mappanevek**: kézi név, ha a **3 — Mappanevek** vagy itt az 5. lépésben "
+            "átírtad; egyébként a **sorszám**. OCR-szöveg sosem lesz mappanév. **Azonos nevet adva több "
+            "blokknak azok képei EGY KÖZÖS mappába kerülnek** (összevonás); az eltérő nevek külön mappába."
         )
         if not distinct:
             st.info("Nincs létrehozandó mappa (nincs szegmens a tervben).")

@@ -2028,6 +2028,248 @@ def test_write_uploaded_media_to_dir_resolves_name_collisions() -> None:
         assert contents == [b"first", b"second", b"third"]
 
 
+def test_shared_store_editor_callback_writes_and_clears_override() -> None:
+    """
+    A megosztott mappanév-szerkesztő ``on_change`` visszahívása: a beírt nevet a szegmens MINDEN
+    identitás-kulcsára a tárba írja; üres / az alapértelmezett sorszámmal egyező érték esetén
+    törli a felülírást (visszaesés az automatikus névre). A fenntartott ``-xx`` jelölőt levágja.
+    """
+    import organizer_metal_app as app_mod
+    from organizer_metal_app import (
+        _on_segment_name_input_change,
+        _store_manual_name_for_segment,
+        _segment_identity_keys,
+        _segment_identity_digest,
+        default_folder_name_for_segment,
+        _STEP3_TAGS_BY_SEGMENT_KEY,
+    )
+    from metal_batch_logic import OrganizePlan, Segment
+
+    root = Path("/tmp/photo_sorter_shared_editor")
+    seg = Segment(folder_key="", plate_image=root / "p.jpg", ocr_raw="x",
+                  photos=[root / "p.jpg"], closed_by_delimiter=None)
+    ids = _segment_identity_keys(seg)
+    wkey = "segname_s3_" + _segment_identity_digest(seg)
+    default_name = default_folder_name_for_segment(0)
+
+    app_mod.st.session_state = {_STEP3_TAGS_BY_SEGMENT_KEY: {}}  # type: ignore[assignment]
+
+    # Kézi név beírása → tárba kerül minden identitás-kulcsra.
+    app_mod.st.session_state[wkey] = "  ALMA  "
+    _on_segment_name_input_change(wkey, ids, default_name)
+    store = app_mod.st.session_state[_STEP3_TAGS_BY_SEGMENT_KEY]
+    assert all(store.get(sid) == "ALMA" for sid in ids)
+    assert _store_manual_name_for_segment(seg, store) == "ALMA"
+
+    # A fenntartott rendszer-jelölő ('-xx') sosem ragad a kézi névbe.
+    app_mod.st.session_state[wkey] = "ALMA-xx"
+    _on_segment_name_input_change(wkey, ids, default_name)
+    store = app_mod.st.session_state[_STEP3_TAGS_BY_SEGMENT_KEY]
+    assert all(store.get(sid) == "ALMA" for sid in ids)
+
+    # Üres mező → a felülírás törlődik (automatikus alapértelmezésre esik vissza).
+    app_mod.st.session_state[wkey] = ""
+    _on_segment_name_input_change(wkey, ids, default_name)
+    store = app_mod.st.session_state[_STEP3_TAGS_BY_SEGMENT_KEY]
+    assert all(sid not in store for sid in ids)
+
+    # Az alapértelmezett sorszámmal megegyező érték sem kerül a tárba (nem „kézi”).
+    app_mod.st.session_state[wkey] = default_name
+    _on_segment_name_input_change(wkey, ids, default_name)
+    store = app_mod.st.session_state[_STEP3_TAGS_BY_SEGMENT_KEY]
+    assert all(sid not in store for sid in ids)
+
+
+def test_leading_delimiterless_folder_rename_reaches_execution() -> None:
+    """
+    (a) A lista elején lévő, **határoló nélküli** (párosítatlan) mappa is átnevezhető a megosztott
+    szerkesztőn keresztül, és a beírt név eljut a tényleges végrehajtásig — **``-xx`` jelölő nélkül**
+    (a kézi név pontosan érvényesül).
+    """
+    import organizer_metal_app as app_mod
+    from organizer_metal_app import (
+        _on_segment_name_input_change,
+        _segment_identity_keys,
+        _segment_identity_digest,
+        default_folder_name_for_segment,
+        _apply_ocr_edits_to_plan,
+        select_execution_segments,
+        build_approved_folder_names,
+        _STEP3_TAGS_BY_SEGMENT_KEY,
+        _STEP3_TAGS_BY_DELIM_KEY,
+        _STEP3_TAGS_BY_PLATE_KEY,
+    )
+    from metal_batch_logic import OrganizePlan, Segment, execute_plan
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        src = root / "src"
+        out = root / "out"
+        src.mkdir()
+        # Fémlap-ELSŐ elrendezés: a vezető mappa határoló nélküli (párosítatlan), majd egy határolós.
+        p_lead = src / "00_lead.jpg"
+        d1 = src / "01_d1.jpg"
+        p_b = src / "02_pB.jpg"
+        for f in (p_lead, d1, p_b):
+            f.write_bytes(b"x")
+        seg_lead = Segment(folder_key="", plate_image=p_lead, ocr_raw="x",
+                           photos=[p_lead], closed_by_delimiter=None)
+        seg_b = Segment(folder_key="", plate_image=p_b, ocr_raw="x",
+                        photos=[p_b], closed_by_delimiter=d1)
+        plan = OrganizePlan(segments=[seg_lead, seg_b], delimiter_hits=[d1])
+
+        app_mod.st.session_state = {  # type: ignore[assignment]
+            "_plan": plan, "_src": str(src),
+            _STEP3_TAGS_BY_SEGMENT_KEY: {}, _STEP3_TAGS_BY_DELIM_KEY: {}, _STEP3_TAGS_BY_PLATE_KEY: {},
+        }
+
+        # A felhasználó a 3. lépésben a VEZETŐ (határoló nélküli) mappát átnevezi.
+        wkey = "segname_s3_" + _segment_identity_digest(seg_lead)
+        app_mod.st.session_state[wkey] = "VEZETO"
+        _on_segment_name_input_change(
+            wkey, _segment_identity_keys(seg_lead), default_folder_name_for_segment(0)
+        )
+        store = app_mod.st.session_state[_STEP3_TAGS_BY_SEGMENT_KEY]
+        assert "VEZETO" in set(store.values())
+
+        # Teljes végrehajtási lánc (mint az 5. lépés gombja).
+        p = _apply_ocr_edits_to_plan(app_mod.st.session_state["_plan"])
+        p.segments = select_execution_segments(
+            p, tag_by_segment=app_mod.st.session_state[_STEP3_TAGS_BY_SEGMENT_KEY],
+            original_ocr_by_plate=None, drop_unedited_delimiterless=False,
+        )
+        approved = build_approved_folder_names(
+            p, tag_by_segment=app_mod.st.session_state[_STEP3_TAGS_BY_SEGMENT_KEY]
+        )
+        # A vezető mappa a felhasználó PONTOS nevét kapja (nincs '-xx'); a határolós a sorszámát.
+        assert approved == ["VEZETO", "2"], approved
+        assert "VEZETO-xx" not in approved
+        for seg, nm in zip(p.segments, approved):
+            seg.folder_key = nm
+        execute_plan(p, out, copy_mode=True)
+        created = sorted(d.name for d in out.iterdir() if d.is_dir())
+        assert "VEZETO" in created and "2" in created
+        assert "VEZETO-xx" not in created
+
+
+def test_step5_name_edit_changes_executed_destination() -> None:
+    """
+    (b) Az 5. lépésben átírt mappanév felülírja a 3. lépésben adottat (közös tár), és a TÉNYLEGES
+    végrehajtás a friss, 5. lépésbeli nevet használja. A 3./5. lépés ugyanazt a tárat írja.
+    """
+    import organizer_metal_app as app_mod
+    from organizer_metal_app import (
+        _on_segment_name_input_change,
+        _segment_identity_keys,
+        _segment_identity_digest,
+        default_folder_name_for_segment,
+        _apply_ocr_edits_to_plan,
+        select_execution_segments,
+        build_approved_folder_names,
+        _STEP3_TAGS_BY_SEGMENT_KEY,
+        _STEP3_TAGS_BY_DELIM_KEY,
+        _STEP3_TAGS_BY_PLATE_KEY,
+    )
+    from metal_batch_logic import OrganizePlan, Segment, execute_plan
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        src = root / "src"
+        out = root / "out"
+        src.mkdir()
+        d1 = src / "01_d1.jpg"
+        p_a = src / "02_pA.jpg"
+        for f in (d1, p_a):
+            f.write_bytes(b"x")
+        seg_a = Segment(folder_key="", plate_image=p_a, ocr_raw="x",
+                        photos=[p_a], closed_by_delimiter=d1)
+        plan = OrganizePlan(segments=[seg_a], delimiter_hits=[d1])
+
+        app_mod.st.session_state = {  # type: ignore[assignment]
+            "_plan": plan, "_src": str(src),
+            _STEP3_TAGS_BY_SEGMENT_KEY: {}, _STEP3_TAGS_BY_DELIM_KEY: {}, _STEP3_TAGS_BY_PLATE_KEY: {},
+        }
+        ids = _segment_identity_keys(seg_a)
+        default_name = default_folder_name_for_segment(0)
+        digest = _segment_identity_digest(seg_a)
+
+        # 3. lépés: "ALMA".
+        wkey3 = "segname_s3_" + digest
+        app_mod.st.session_state[wkey3] = "ALMA"
+        _on_segment_name_input_change(wkey3, ids, default_name)
+        assert set(app_mod.st.session_state[_STEP3_TAGS_BY_SEGMENT_KEY].values()) == {"ALMA"}
+
+        # 5. lépés: ugyanazt a mappát "KORTE"-re írja (külön widget-kulcs, KÖZÖS tár).
+        wkey5 = "segname_s5_" + digest
+        app_mod.st.session_state[wkey5] = "KORTE"
+        _on_segment_name_input_change(wkey5, ids, default_name)
+        assert set(app_mod.st.session_state[_STEP3_TAGS_BY_SEGMENT_KEY].values()) == {"KORTE"}
+
+        # A végrehajtás a friss (5. lépésbeli) nevet használja.
+        p = _apply_ocr_edits_to_plan(app_mod.st.session_state["_plan"])
+        p.segments = select_execution_segments(
+            p, tag_by_segment=app_mod.st.session_state[_STEP3_TAGS_BY_SEGMENT_KEY],
+            original_ocr_by_plate=None, drop_unedited_delimiterless=False,
+        )
+        approved = build_approved_folder_names(
+            p, tag_by_segment=app_mod.st.session_state[_STEP3_TAGS_BY_SEGMENT_KEY]
+        )
+        assert approved == ["KORTE"], approved
+        for seg, nm in zip(p.segments, approved):
+            seg.folder_key = nm
+        execute_plan(p, out, copy_mode=True)
+        created = sorted(d.name for d in out.iterdir() if d.is_dir())
+        assert created == ["KORTE"], created
+
+
+def test_edited_names_consistent_no_spurious_xx_mixed_segments() -> None:
+    """
+    (c) Vegyes szegmensek: a kézzel elnevezett mappák (határolós ÉS határoló nélküli) a PONTOS
+    nevüket kapják '-xx' nélkül; csak az át NEM nevezett, határoló nélküli mappa kap '-xx'
+    rendszer-jelölőt. Bárhol szerkesztve a tár az egyetlen, konzisztens igazságforrás.
+    """
+    import organizer_metal_app as app_mod
+    from organizer_metal_app import (
+        _on_segment_name_input_change,
+        _segment_identity_keys,
+        _segment_identity_digest,
+        default_folder_name_for_segment,
+        build_approved_folder_names,
+        _STEP3_TAGS_BY_SEGMENT_KEY,
+    )
+    from metal_batch_logic import OrganizePlan, Segment
+
+    root = Path("/tmp/photo_sorter_mixed_xx")
+    d = root / "d.jpg"
+    seg_backed = Segment(folder_key="", plate_image=root / "a.jpg", ocr_raw="x",
+                         photos=[root / "a.jpg"], closed_by_delimiter=d)        # idx0
+    seg_less_named = Segment(folder_key="", plate_image=root / "b.jpg", ocr_raw="x",
+                             photos=[root / "b.jpg"], closed_by_delimiter=None)  # idx1 (átnevezve)
+    seg_less_default = Segment(folder_key="", plate_image=root / "c.jpg", ocr_raw="x",
+                               photos=[root / "c.jpg"], closed_by_delimiter=None)  # idx2 (érintetlen)
+    plan = OrganizePlan(
+        segments=[seg_backed, seg_less_named, seg_less_default], delimiter_hits=[d]
+    )
+
+    app_mod.st.session_state = {_STEP3_TAGS_BY_SEGMENT_KEY: {}}  # type: ignore[assignment]
+
+    # A határolós mappát "BACKED"-re, a határoló nélkülit "KEZI"-re nevezzük.
+    for si, seg, name in [(0, seg_backed, "BACKED"), (1, seg_less_named, "KEZI")]:
+        ids = _segment_identity_keys(seg)
+        wkey = "segname_s3_" + _segment_identity_digest(seg)
+        app_mod.st.session_state[wkey] = name
+        _on_segment_name_input_change(wkey, ids, default_folder_name_for_segment(si))
+
+    store = app_mod.st.session_state[_STEP3_TAGS_BY_SEGMENT_KEY]
+    approved = build_approved_folder_names(plan, tag_by_segment=store)
+    # BACKED: határolós, kézi → "BACKED" (nincs jelölő).
+    # KEZI: határoló nélküli, DE kézi → "KEZI" (NINCS '-xx').
+    # idx2: határoló nélküli, érintetlen → "3-xx" (rendszer-jelölő).
+    assert approved == ["BACKED", "KEZI", "3-xx"], approved
+    assert "BACKED-xx" not in approved
+    assert "KEZI-xx" not in approved
+
+
 if __name__ == "__main__":
     test_sort_by_name_then_mtime()
     test_safe_folder_name()
@@ -2077,4 +2319,8 @@ if __name__ == "__main__":
     test_step3_no_segments_notice_messages()
     test_write_uploaded_media_to_dir_preserves_names_and_order()
     test_write_uploaded_media_to_dir_resolves_name_collisions()
+    test_shared_store_editor_callback_writes_and_clears_override()
+    test_leading_delimiterless_folder_rename_reaches_execution()
+    test_step5_name_edit_changes_executed_destination()
+    test_edited_names_consistent_no_spurious_xx_mixed_segments()
     print("OK — minden teszt sikeres")

@@ -1456,7 +1456,9 @@ def test_step5_preview_uses_current_step3_name_over_stale_snapshot() -> None:
         assert resolved is not None
         prepared, live_by_segment = resolved
         names = build_approved_folder_names(prepared, tag_by_segment=live_by_segment)
-        assert names == ["ALMA", "KV99999-xx"], names
+        # A **kézzel** elnevezett, határoló nélküli mappa a felhasználó PONTOS nevét kapja —
+        # NINCS rajta a rendszer ``-xx`` jelölő (épp ez a bejelentett hiba: a beírt név menjen át).
+        assert names == ["ALMA", "KV99999"], names
         assert "KV49752" not in " ".join(names)
 
         # 5. lépés végrehajtás-előkészítés (persist=True): szintén a friss nevet használja,
@@ -1465,10 +1467,157 @@ def test_step5_preview_uses_current_step3_name_over_stale_snapshot() -> None:
         exec_names = build_approved_folder_names(
             executed, tag_by_segment=app_mod.st.session_state.get(_STEP3_TAGS_BY_SEGMENT_KEY) or {}
         )
-        assert exec_names == ["ALMA", "KV99999-xx"], exec_names
+        assert exec_names == ["ALMA", "KV99999"], exec_names
         saved_values = set((app_mod.st.session_state.get(_STEP3_TAGS_BY_SEGMENT_KEY) or {}).values())
         assert "KV49752" not in saved_values
         assert "KV99999" in saved_values
+
+
+def test_manual_delimiterless_name_drops_xx_marker_real_regen_flow() -> None:
+    """
+    A BEJELENTETT hiba gyökér-regressziója (a korábbi javítás NEM oldotta meg):
+
+    A felhasználó az UTOLSÓ, határoló nélküli mappát a 3. lépésben ``KV49752`` névre írja át.
+    Az 5. lépésnek (előnézet ÉS végrehajtás) a felhasználó **pontos** nevét kell mutatnia
+    (``KV49752``) — NEM a rendszer ``-xx`` jelölővel megtoldva (``KV49752-xx``), amely
+    megkülönböztethetetlen a korábbi futás „beragadt” értékétől, ezért tűnt úgy, hogy a 3.
+    lépésben beírt név „nem megy át” az 5. lépésbe.
+
+    Lefedi a teljes, valós láncot: ``_segment_media_to_plan`` → 3. lépés widget szerkesztés →
+    4. lépés **Terv újraszámolása** (snapshot mentés + cache-replay + widget törlés) → 5. lépés.
+    Ezen felül egy **poisoned** (``KV49752-xx``) stabil mentés is öngyógyul (régi jelölő levágva),
+    még akkor is, ha a felhasználó NEM gépeli újra a nevet — így friss session / újraindítás
+    nélkül is helyreáll.
+    """
+    import organizer_metal_app as app_mod
+    from PIL import Image
+    import imagehash
+    from organizer_metal_app import (
+        _apply_ocr_edits_to_plan,
+        apply_step3_tag_edits_to_plan,
+        snapshot_step3_tag_overrides_from_plan,
+        get_step3_delimiter_preview_rows,
+        _get_step3_ordered_media_files,
+        _preview_row_segment_indices,
+        build_approved_folder_names,
+        select_execution_segments,
+        _resolve_execution_plan_for_preview,
+        _original_ocr_by_plate_from_cache,
+        _segment_identity_keys,
+        _STEP3_TAGS_BY_SEGMENT_KEY,
+        _STEP3_TAGS_BY_DELIM_KEY,
+        _STEP3_TAGS_BY_PLATE_KEY,
+    )
+    from metal_batch_logic import PlanScanCache, _segment_media_to_plan, replay_plan_from_cache
+
+    def fake_ocr(path):
+        return None
+
+    def regenerate(cache):
+        """A 4. lépés „Terv újraszámolása” gomb lényegi törzse (session-state szinten)."""
+        old_plan = app_mod.st.session_state.get("_plan")
+        edited_old = _apply_ocr_edits_to_plan(old_plan)
+        pr_old, _ = get_step3_delimiter_preview_rows(edited_old)
+        fo_old = _get_step3_ordered_media_files(edited_old)
+        by_d, by_p, by_s = snapshot_step3_tag_overrides_from_plan(edited_old, pr_old, fo_old)
+        app_mod.st.session_state[_STEP3_TAGS_BY_DELIM_KEY] = by_d
+        app_mod.st.session_state[_STEP3_TAGS_BY_PLATE_KEY] = by_p
+        app_mod.st.session_state[_STEP3_TAGS_BY_SEGMENT_KEY] = by_s
+        new_plan = replay_plan_from_cache(cache, non_delimiter_paths=[], force_delimiter_paths=[], ocr_fn=fake_ocr)
+        pr_new, _ = get_step3_delimiter_preview_rows(new_plan)
+        fo_new = _get_step3_ordered_media_files(new_plan)
+        new_plan = apply_step3_tag_edits_to_plan(
+            new_plan, tag_by_dix={}, tag_by_seg={}, preview_rows=pr_new, files_ord=fo_new,
+            tag_by_delim={}, tag_by_plate={},
+            tag_by_segment=app_mod.st.session_state.get(_STEP3_TAGS_BY_SEGMENT_KEY) or {},
+        )
+        by_d2, by_p2, by_s2 = snapshot_step3_tag_overrides_from_plan(new_plan, pr_new, fo_new)
+        app_mod.st.session_state[_STEP3_TAGS_BY_DELIM_KEY] = by_d2
+        app_mod.st.session_state[_STEP3_TAGS_BY_PLATE_KEY] = by_p2
+        app_mod.st.session_state[_STEP3_TAGS_BY_SEGMENT_KEY] = by_s2
+        app_mod.st.session_state["_plan"] = new_plan
+        app_mod.st.session_state["_plan_generation"] = int(app_mod.st.session_state.get("_plan_generation", 1)) + 1
+        for k in list(app_mod.st.session_state.keys()):
+            if isinstance(k, str) and (k.startswith("step3_tag_ocr_") or k.startswith("seg_ocr_raw_")):
+                del app_mod.st.session_state[k]
+
+    def step5_preview_names():
+        resolved = _resolve_execution_plan_for_preview()
+        assert resolved is not None
+        prepared, live = resolved
+        return build_approved_folder_names(prepared, tag_by_segment=live)
+
+    def step5_execute_names():
+        plan_e = _apply_ocr_edits_to_plan(app_mod.st.session_state["_plan"])
+        plan_e.segments = select_execution_segments(
+            plan_e, tag_by_segment=app_mod.st.session_state.get(_STEP3_TAGS_BY_SEGMENT_KEY) or {},
+            original_ocr_by_plate=_original_ocr_by_plate_from_cache(), drop_unedited_delimiterless=False,
+        )
+        return build_approved_folder_names(
+            plan_e, tag_by_segment=app_mod.st.session_state.get(_STEP3_TAGS_BY_SEGMENT_KEY) or {}
+        )
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        # layout: d1 pA d2 pB d3 pC  → seg0/seg1 határolós, seg2 (pC) határoló NÉLKÜLI (utolsó mappa)
+        names_in = ["01_d1.jpg", "02_pA.jpg", "03_d2.jpg", "04_pB.jpg", "05_d3.jpg", "06_pC.jpg"]
+        files = []
+        for n in names_in:
+            p = root / n
+            Image.new("RGB", (16, 16), (10, 10, 10) if "_d" in n else (200, 100, 50)).save(p)
+            files.append(p)
+        delim_set = {str(root / n) for n in names_in if "_d" in n}
+        delim_cands = {app_mod._norm_path_str(Path(p)) for p in delim_set}
+        ref = imagehash.hex_to_hash("0000000000000000")
+        plan = _segment_media_to_plan(
+            files=files, hash_by_path={}, ref_phash=ref, ref_ahash=ref, max_hamming=18,
+            skip_del=set(), force_del=set(), ocr=fake_ocr, ocr_by_path={}, use_ocr_cache=False,
+            delimiter_candidates={Path(x).as_posix() for x in delim_set}, total_images=None, progress=None,
+        )
+        assert len(plan.segments) == 3
+        assert plan.segments[-1].closed_by_delimiter is None  # utolsó = határoló nélküli
+
+        cache = PlanScanCache(
+            files=list(files), hash_by_path={}, ref_phash=ref, ref_ahash=ref, max_hamming=18,
+            inner_ratio=0.92, source_str=str(root.expanduser()), recursive=False, image_count=len(files),
+            files_sorted_by_name_mtime=True, ocr_by_path={f: None for f in files}, delimiter_candidates=set(delim_cands),
+        )
+        app_mod.st.session_state = {  # type: ignore[assignment]
+            "_plan": plan, "_src": str(root), "metal_recursive_chk": False, "_recursive": False,
+            "metal_max_hamming": 18, "metal_del_inner": 0.92, "_plan_scan_cache": cache,
+            "_forced_delimiter_paths": [], "_demoted_delimiter_paths": [], "_plan_generation": 1,
+            _STEP3_TAGS_BY_SEGMENT_KEY: {}, _STEP3_TAGS_BY_DELIM_KEY: {}, _STEP3_TAGS_BY_PLATE_KEY: {},
+        }
+
+        # Melyik widgettel rendereli a UI az utolsó (határoló nélküli) szegmenst?
+        pr, _ = get_step3_delimiter_preview_rows(plan)
+        fo = _get_step3_ordered_media_files(plan)
+        seg_ix = _preview_row_segment_indices(plan, pr, fo)
+        last_si = len(plan.segments) - 1
+        last_dix = next((dix for dix, si in enumerate(seg_ix) if si == last_si), None)
+        assert last_dix is not None  # az utolsó mappa határoló-sorhoz párosul (step3_tag_ocr_*)
+
+        # 1) A felhasználó az utolsó mappát KV49752-re írja, majd 4. lépés → Terv újraszámolása.
+        app_mod.st.session_state["step3_tag_ocr_%d" % last_dix] = "KV49752"
+        regenerate(cache)
+        # Az 5. lépés a felhasználó PONTOS nevét veszi át (NINCS -xx), előnézet ÉS végrehajtás:
+        assert step5_preview_names() == ["1", "2", "KV49752"], step5_preview_names()
+        assert step5_execute_names() == ["1", "2", "KV49752"], step5_execute_names()
+
+        # 2) POISONED stabil mentés: a korábbi futásból a már megjelölt KV49752-xx ragadt be, és a
+        #    felhasználó NEM gépeli újra. A jelölő öngyógyul → tiszta KV49752 (friss session nélkül is).
+        poisoned = {sid: "KV49752-xx" for sid in _segment_identity_keys(app_mod.st.session_state["_plan"].segments[-1])}
+        app_mod.st.session_state[_STEP3_TAGS_BY_SEGMENT_KEY] = dict(poisoned)
+        for k in list(app_mod.st.session_state.keys()):
+            if isinstance(k, str) and (k.startswith("step3_tag_ocr_") or k.startswith("seg_ocr_raw_")):
+                del app_mod.st.session_state[k]
+        assert step5_preview_names() == ["1", "2", "KV49752"], step5_preview_names()
+        # Újraszámolás után a mentés is letisztul (a régi jelölt érték nem éled fel):
+        regenerate(cache)
+        saved = set((app_mod.st.session_state.get(_STEP3_TAGS_BY_SEGMENT_KEY) or {}).values())
+        assert "KV49752-xx" not in saved
+        assert "KV49752" in saved
+        assert step5_execute_names() == ["1", "2", "KV49752"], step5_execute_names()
 
 
 def test_plan_required_notice_shows_success_after_sort() -> None:
@@ -1913,6 +2062,7 @@ if __name__ == "__main__":
     test_execution_includes_all_step3_segments_with_xx_and_merge()
     test_untouched_segments_each_get_a_folder_real_flow()
     test_step5_preview_uses_current_step3_name_over_stale_snapshot()
+    test_manual_delimiterless_name_drops_xx_marker_real_regen_flow()
     test_plan_required_notice_shows_success_after_sort()
     test_select_execution_segments_robust_to_missing_cache()
     test_step3_interval_between_delimiters()

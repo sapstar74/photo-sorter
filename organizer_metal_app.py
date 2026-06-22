@@ -1239,6 +1239,21 @@ def mark_delimiterless_name(name: str, *, has_delimiter: bool) -> str:
     return f"{base}{DELIMITERLESS_MARKER}"
 
 
+def _strip_delimiterless_marker(name: str) -> str:
+    """
+    Eltávolítja a **rendszer** ``-xx`` jelölőt egy névről. A ``-xx`` egy **build-időben**
+    számolt, határoló nélküli jelölő (nem felhasználói szöveg) — ezért egy **kézzel** beírt
+    névben sosem szabadna szerepelnie. Ez a segéd „öngyógyítja” azokat az eseteket, amikor egy
+    korábbi futásból / poisoned session-state-ből a már megjelölt (``KV49752-xx``) érték ragadt
+    be a stabil mentésbe vagy a widgetbe: a kézi név feloldásakor levágjuk a fenntartott jelölőt,
+    így a felhasználó által beírt **tiszta** név (``KV49752``) nyer.
+    """
+    base = (name or "").strip()
+    while base.endswith(DELIMITERLESS_MARKER) and len(base) > len(DELIMITERLESS_MARKER):
+        base = base[: -len(DELIMITERLESS_MARKER)].strip()
+    return base
+
+
 def build_approved_folder_names(
     plan: OrganizePlan,
     *,
@@ -1274,8 +1289,12 @@ def build_approved_folder_names(
                 if v:
                     manual = v
                     break
+        is_manual = False
         if manual:
-            nm = safe_folder_name(manual)
+            # Kézi név: a build-időben számolt ``-xx`` jelölőt sosem hordozhatja — ha egy korábbi
+            # (poisoned) értékből mégis ott ragadt, levágjuk, hogy a felhasználó **tiszta** neve nyerjen.
+            nm = safe_folder_name(_strip_delimiterless_marker(manual))
+            is_manual = True
         elif tag_by_segment is not None:
             # Élő flow + nincs kézi név → garantáltan egyedi sorszám (nem a folder_key).
             nm = safe_folder_name(default_folder_name_for_segment(i))
@@ -1283,7 +1302,15 @@ def build_approved_folder_names(
             nm = seg.folder_key.strip() if isinstance(seg.folder_key, str) else ""
             if not nm:
                 nm = safe_folder_name(default_folder_name_for_segment(i))
-        nm = mark_delimiterless_name(nm, has_delimiter=seg.closed_by_delimiter is not None)
+        # A ``-xx`` jelölő a határoló nélküli mappák **rendszer**-jelölése. Élő flow-ban (van
+        # ``tag_by_segment``) CSAK a sorszám-alapértelmezett (át NEM nevezett) határoló nélküli
+        # mappákra tesszük — ezek „nincs határoló, nézd át” jelzése marad. A **kézzel elnevezett**
+        # határoló nélküli mappa a felhasználó pontos nevét kapja (nincs ``-xx``), különben a 3.
+        # lépésben beírt név sosem „menne át” érintetlenül az 5. lépésbe (épp a bejelentett hiba).
+        # A visszafelé-kompatibilis (``tag_by_segment is None``) ág változatlan: ott nem tudjuk a
+        # kézi/auto különbséget, ezért a korábbi „mindig jelöl” viselkedés marad.
+        if tag_by_segment is None or not is_manual:
+            nm = mark_delimiterless_name(nm, has_delimiter=seg.closed_by_delimiter is not None)
         names.append(nm)
     return names
 
@@ -1458,7 +1485,10 @@ def snapshot_step3_tag_overrides_from_plan(
     # Szegmensenként: van-e kézi (a sorszámtól eltérő) név?
     manual_by_si: dict[int, str] = {}
     for i, seg in enumerate(plan.segments):
-        name = _normalize_tag_text(seg.ocr_raw, "")
+        # A fenntartott ``-xx`` jelölő sosem része a **kézi** névnek; ha egy korábbi/poisoned
+        # értékből ott ragadt, levágjuk, hogy a mentés is „öngyógyuljon” (a régi jelölt érték ne
+        # éledjen újra az 5. lépésben).
+        name = _strip_delimiterless_marker(_normalize_tag_text(seg.ocr_raw, ""))
         if name and name != default_folder_name_for_segment(i):
             manual_by_si[i] = name
 

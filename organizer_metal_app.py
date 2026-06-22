@@ -2585,42 +2585,6 @@ def _fragment_step3_tag_row_editor(plan: OrganizePlan, dix: int, si: int, delim:
         st.caption(f"OCR (tipp, nem mappanév): `{html.escape(ocr_hint[:60])}`")
 
 
-@st.fragment
-def _fragment_step3_unmatched_tag_editor(plan: OrganizePlan, si: int) -> None:
-    """Párosítatlan szegmens: csak a névmező fut újra gépeléskor."""
-    seg = plan.segments[si]
-    ko = f"seg_ocr_raw_{si}"
-    default_name = default_folder_name_for_segment(si)
-    if ko not in st.session_state:
-        saved = None
-        by_segment = st.session_state.get(_STEP3_TAGS_BY_SEGMENT_KEY) or {}
-        if isinstance(by_segment, dict):
-            for sid in _segment_identity_keys(seg):
-                saved = by_segment.get(sid)
-                if saved:
-                    break
-        if not saved:
-            saved = (st.session_state.get(_STEP3_TAGS_BY_PLATE_KEY) or {}).get(
-                _norm_path_str(seg.plate_image)
-            )
-        # Alapértelmezés = sorszám (NEM OCR).
-        st.session_state[ko] = saved if saved else default_name
-    st.markdown("**TAG / mappa név**")
-    st.text_input(
-        "TAG / mappa név",
-        key=ko,
-        label_visibility="collapsed",
-        help="Alapértelmezés a sorszám; írd át tetszőleges névre.",
-    )
-    r1 = st.session_state.get(ko, default_name)
-    r1 = (r1 or "").strip() if isinstance(r1, str) else str(r1).strip()
-    tag_disp = r1 or default_name
-    st.caption(f"Mappa (fájlrendszer): `{safe_folder_name(tag_disp)}`")
-    ocr_hint = _normalize_tag_text(seg.ocr_raw, "")
-    if ocr_hint and ocr_hint != default_name:
-        st.caption(f"OCR (tipp, nem mappanév): `{html.escape(ocr_hint[:60])}`")
-
-
 def step3_no_segments_notice(
     *, has_delimiter_rows: bool, upload_mode: bool
 ) -> tuple[str, str]:
@@ -2700,35 +2664,12 @@ def _render_step3_tag_mappa_forms(plan: OrganizePlan) -> None:
         "A név szerkesztésekor csak a szövegmező fut újra. "
         "Ha több blokk ugyanahhoz a terv-szegmenshez tartozik, a **Válogatás** (5. lépés) az **utolsó** kitöltött blokk szerinti értéket veszi át."
     )
-    matched_seg: set[int] = {si for si in seg_ix_preview if si is not None}
-
-    # A lista elején lévő / párosítatlan szegmensek (jellemzően az ELSŐ, határoló nélküli
-    # mappa, mert előtte nincs határoló-sor) — KIEMELTEN, a határoló-sorok ELŐTT, saját
-    # szövegmezővel. Így minden szegmens elérhető és a kézi név mindig a helyes mappára kerül.
-    unmatched_lead = [si for si in range(len(plan.segments)) if si not in matched_seg]
-    if unmatched_lead:
-        st.markdown("#### Mappák lezáró/megelőző határoló nélkül (a lista elején vagy végén)")
-        st.caption(
-            "Ezekhez nincs külön határoló-sor (pl. az **első** mappa, amely előtt nincs határoló). "
-            "Itt add meg a nevüket — a **Válogatás** (5. lépés) ezt a nevet használja."
-        )
-        for si in unmatched_lead:
-            seg = plan.segments[si]
-            ocr_disp = seg.ocr_raw if len(seg.ocr_raw) <= 44 else seg.ocr_raw[:44] + "…"
-            st.markdown(
-                f"**Mappa (terv-szegmens {si + 1})** — fémlap: `{html.escape(seg.plate_image.name)}`",
-                unsafe_allow_html=True,
-            )
-            if not _safe_st_image_path(
-                seg.plate_image,
-                caption=f"fémlap: {seg.plate_image.name}"[:56],
-                width=_GALLERY_COL_THUMB_WIDTH,
-                missing_label=str(seg.plate_image),
-            ):
-                st.caption(f"OCR: `{html.escape(ocr_disp)}`")
-            _fragment_step3_unmatched_tag_editor(plan, si)
-            _render_step3_folder_photos_expander(seg)
-        st.divider()
+    # MEGJEGYZÉS: a korábbi „Mappák lezáró/megelőző határoló nélkül (a lista elején vagy végén)”
+    # szakaszt (a párosítatlan szegmensek kézi névmezőit) a felhasználó kérésére eltávolítottuk.
+    # A párosítatlan / határoló nélküli szegmensek továbbra is kapnak nevet: vagy a stabil (kézi)
+    # mentésből, vagy a sorszám-alapértelmezésből (+ ``-xx`` rendszerjelölő) — lásd
+    # ``apply_step3_tag_edits_to_plan`` és ``build_approved_folder_names``. Itt már csak a
+    # határoló-soros TAG/Mappa szerkesztők jelennek meg.
 
     for dix, (delim, followers) in enumerate(preview_rows):
         si = seg_ix_preview[dix]
@@ -2779,20 +2720,21 @@ def _render_step3_tag_mappa_forms(plan: OrganizePlan) -> None:
                     "**Képek frissítése**, majd a **4 — Terv véglegesítése → Terv újraszámolása**."
                 )
             else:
-                # A sorhoz tartozó szegmens (ha van) a fenti „Mappák … határoló nélkül”
-                # szakaszban kap nevet. Feltöltés-módban NINCS helyi forrásmappa, ezért nem
-                # arra utalunk, hanem a tényleges helyreállítási lépésekre.
+                # A sorhoz nem párosítható terv-szegmens. A párosítatlan / határoló nélküli
+                # szegmensek automatikus (sorszám-alapú, ``-xx`` jelölős) nevet kapnak — kézi
+                # átnevezésük már nem itt történik. Feltöltés-módban NINCS helyi forrásmappa,
+                # ezért ott a tényleges helyreállítási lépésekre utalunk.
                 if _is_upload_mode():
                     st.warning(
                         "Ehhez a határoló sorhoz nem párosítható külön terv-szegmens (sorrend eltérés). "
-                        "A nevét — ha van hozzá szegmens — a fenti **„Mappák … határoló nélkül”** "
-                        "szakaszban add meg; szükség esetén a **4 — Terv véglegesítése → Terv újraszámolása**."
+                        "Az érintett mappa automatikus, sorszám-alapú nevet kap; szükség esetén a "
+                        "**4 — Terv véglegesítése → Terv újraszámolása**."
                     )
                 else:
                     st.warning(
                         "Ehhez a határoló sorhoz nem párosítható külön terv-szegmens (útvonal / sorrend eltérés). "
-                        "A nevét a fenti **„Mappák … határoló nélkül”** szakaszban add meg; "
-                        "szükség esetén a **4 — Terv véglegesítése → Terv újraszámolása**, vagy ellenőrizd a forrásmappát."
+                        "Az érintett mappa automatikus, sorszám-alapú nevet kap; szükség esetén a "
+                        "**4 — Terv véglegesítése → Terv újraszámolása**, vagy ellenőrizd a forrásmappát."
                     )
 
 

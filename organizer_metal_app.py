@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import html
+import logging
 import os
 import platform
 import queue
@@ -47,13 +48,22 @@ st.set_page_config(page_title="TAG / mappa (fém + határoló)", layout="wide")
 
 
 def _register_heif_opener() -> None:
-    """HEIC/HEIF megnyitás macOS-en, ha telepítve a pillow-heif."""
+    """
+    HEIC/HEIF megnyitás bekapcsolása a PIL-be a ``pillow-heif`` segítségével.
+
+    Modul-importkor **egyszer** fut, minden ``Image.open`` előtt. Működik macOS-en és
+    Linuxon (Streamlit Cloud) is, mert a wheel bundle-öli a ``libheif``-et. Ha a csomag
+    hiányzik, naplózunk és tovább működünk (a HEIC/HEIF fájlok ilyenkor kimaradnak),
+    de a ``requirements.txt`` szerint telepítve kell lennie.
+    """
     try:
         from pillow_heif import register_heif_opener
 
         register_heif_opener()
-    except ImportError:
-        pass
+    except Exception as exc:  # ImportError vagy ritka init hiba
+        logging.getLogger(__name__).warning(
+            "pillow-heif nem elérhető (%s) — HEIC/HEIF fájlok kimaradhatnak.", exc
+        )
 
 
 _register_heif_opener()

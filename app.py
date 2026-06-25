@@ -5,6 +5,7 @@ Forrás mappa képeit kategória gombokkal másolod vagy áthelyezed cél almapp
 
 from __future__ import annotations
 
+import logging
 import shutil
 import uuid
 from pathlib import Path
@@ -16,7 +17,33 @@ from folder_picker import ask_directory
 
 _BROWSE_WARN_KEY = "_browse_barrier_msg_ps"
 
-IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tiff", ".tif"}
+IMAGE_SUFFIXES = {
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".webp",
+    ".gif",
+    ".bmp",
+    ".tiff",
+    ".tif",
+    ".heic",
+    ".heif",
+}
+
+
+def _register_heif_opener() -> None:
+    """HEIC/HEIF megnyitás bekapcsolása a PIL-be (pillow-heif); hiba esetén naplóz és tovább."""
+    try:
+        from pillow_heif import register_heif_opener
+
+        register_heif_opener()
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "pillow-heif nem elérhető (%s) — HEIC/HEIF fájlok kimaradhatnak.", exc
+        )
+
+
+_register_heif_opener()
 
 
 def list_images(source: Path, recursive: bool) -> list[Path]:

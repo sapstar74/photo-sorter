@@ -1,3 +1,6 @@
 tesseract-ocr
 tesseract-ocr-hun
 tesseract-ocr-eng
+# Megjegyzés: HEIC/HEIF-hez NEM kell apt-csomag (pl. libheif1) — a pillow-heif
+# manylinux wheel bundle-öli a libheif-et. Szándékosan nem adunk hozzá apt-libet,
+# hogy elkerüljük a korábbi libglib2.0-0-hoz hasonló apt-ütközéseket.

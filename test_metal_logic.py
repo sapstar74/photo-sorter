@@ -907,6 +907,59 @@ def test_safe_image_display_helpers() -> None:
     assert "str" not in w_ann
 
 
+def test_heic_heif_extensions_accepted_everywhere() -> None:
+    """A HEIC/HEIF kiterjesztés a felfedezésben, az app.py listájában és a feltöltő típusokban is benne van."""
+    # Felfedezés (forrásmappa-szkennelés + határoló-felismerés a metal_batch_logic-ben).
+    assert ".heic" in IMAGE_SUFFIXES
+    assert ".heif" in IMAGE_SUFFIXES
+
+    # A párhuzamos egyszerű rendező (app.py) is felismeri.
+    import app as app_simple
+
+    assert ".heic" in app_simple.IMAGE_SUFFIXES
+    assert ".heif" in app_simple.IMAGE_SUFFIXES
+
+    # Felhő/feltöltés mód uploader-típusai (organizer_metal_app).
+    import organizer_metal_app as omd
+
+    assert "heic" in omd._CLOUD_SRC_TYPES
+    assert "heif" in omd._CLOUD_SRC_TYPES
+
+
+def test_heif_opener_registered_and_heic_roundtrip() -> None:
+    """A heif opener regisztrálva van; egy generált HEIC megnyitható és hash-elhető az app képútján."""
+    from PIL import Image
+
+    try:
+        import pillow_heif  # noqa: F401
+    except ImportError:
+        # A requirements szerint telepítve kell lennie; ha nincs, ne bukjon a teszt.
+        import pytest
+
+        pytest.skip("pillow-heif nincs telepítve ebben a környezetben")
+
+    # Az import-időben futó _register_heif_opener() után a PIL ismeri a HEIF-et.
+    from organizer_metal_app import _load_rgb_image
+
+    assert ".heic" in Image.registered_extensions()
+
+    import imagehash
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        heic_path = root / "sample.heic"
+        Image.new("RGB", (32, 24), color=(10, 120, 200)).save(heic_path, format="HEIF")
+        assert heic_path.stat().st_size > 0
+
+        loaded = _load_rgb_image(heic_path)
+        assert loaded is not None
+        assert loaded.size[0] > 0 and loaded.size[1] > 0
+
+        ph = imagehash.phash(loaded)
+        ah = imagehash.average_hash(loaded)
+        assert ph is not None and ah is not None
+
+
 def test_sanitize_delimiter_preview_rows() -> None:
     from organizer_metal_app import _sanitize_delimiter_preview_rows
 
@@ -2315,6 +2368,8 @@ if __name__ == "__main__":
     test_step3_names_survive_plate_first_no_leading_delimiter()
     test_step3_first_and_mid_segment_names_survive_rebuild()
     test_safe_image_display_helpers()
+    test_heic_heif_extensions_accepted_everywhere()
+    test_heif_opener_registered_and_heic_roundtrip()
     test_sanitize_delimiter_preview_rows()
     test_step3_no_segments_notice_messages()
     test_write_uploaded_media_to_dir_preserves_names_and_order()

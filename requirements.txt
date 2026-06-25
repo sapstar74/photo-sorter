@@ -4,5 +4,6 @@ opencv-python-headless>=4.8.0
 numpy>=1.24.0
 pytesseract>=0.3.10
 ImageHash>=4.3.0
-# HEIC/HEIF előnézet macOS-en (opcionális): pip install pillow-heif
-pillow-heif>=0.16.0; sys_platform == "darwin"
+# HEIC/HEIF támogatás (macOS + Linux/Streamlit Cloud egyaránt).
+# A manylinux/macOS wheel-ek bundle-ölik a libheif-et, így nem kell apt-csomag.
+pillow-heif>=0.16.0

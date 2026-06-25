@@ -35,7 +35,7 @@ Cím: **http://127.0.0.1:8510** (vagy az alapértelmezett **8501**, ha nem adsz 
 4. **Művelet**: másolás vagy áthelyezés.
 5. **Képek betöltése** után lépkedhetsz: kategória gomb → a fájl a megfelelő almappába kerül, jön a következő kép.
 
-Támogatott kiterjesztések: `.jpg`, `.jpeg`, `.png`, `.webp`, `.gif` (és nagybetűs változatok). A HEIC megjelenítéshez külön bővítmény kell; ilyen fájlokat egyelőre kihagyja a lista, ha nem nyitható meg.
+Támogatott kiterjesztések: `.jpg`, `.jpeg`, `.png`, `.webp`, `.gif`, `.bmp`, `.tif`/`.tiff`, valamint `.heic`/`.heif` (és nagybetűs változatok). A HEIC/HEIF fájlok már **teljes körűen támogatottak** (megjelenítés, EXIF-orientáció, pHash/aHash, fémlap-OCR, másolás/áthelyezés) — a `pillow-heif` csomag biztosítja, ami **helyben (macOS) és Streamlit Cloud-on (Linux) egyaránt** működik (a wheel bundle-öli a `libheif`-et, nem kell apt-csomag). Ezeket a fájlokat a program már nem hagyja ki.
 
 ## Megjegyzés
 

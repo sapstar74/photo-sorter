@@ -8,9 +8,43 @@ from pathlib import Path
 
 from metal_batch_logic import (
     IMAGE_SUFFIXES,
+    folder_path_error_message,
+    normalize_user_path,
     sort_media_paths_by_name_then_mtime,
     safe_folder_name,
 )
+
+
+def test_normalize_user_path_strips_quotes_and_file_uri() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        raw = Path(td)
+        assert normalize_user_path(f"  {raw}  ").is_dir()
+        assert normalize_user_path(f'"{raw}"').is_dir()
+        assert normalize_user_path(f"'{raw}'").is_dir()
+        assert normalize_user_path(f"file://{raw}").is_dir()
+
+
+def test_folder_path_error_message_distinguishes_missing_and_file() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        missing = root / "nincs_ilyen"
+        assert "nem létezik" in folder_path_error_message(missing)
+        f = root / "egy_fajl.txt"
+        f.write_text("x")
+        assert "Fájl van megadva" in folder_path_error_message(f)
+        assert folder_path_error_message(f'"{root}"') == folder_path_error_message(root)
+
+
+def test_list_sorted_media_accepts_quoted_path() -> None:
+    from metal_batch_logic import list_sorted_media
+
+    with tempfile.TemporaryDirectory() as td:
+        (Path(td) / "a.jpg").write_bytes(b"x")
+        ordered, err = list_sorted_media(f'"{td}"', recursive=False)
+        assert err is None
+        ordered2, err2 = list_sorted_media(td, recursive=False)
+        assert err2 is None
+        assert [p.name for p in ordered] == [p.name for p in ordered2] == ["a.jpg"]
 
 
 def test_sort_by_name_then_mtime() -> None:

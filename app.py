@@ -10,6 +10,8 @@ import shutil
 import uuid
 from pathlib import Path
 
+from metal_batch_logic import normalize_user_path
+
 import streamlit as st
 from PIL import Image
 
@@ -118,7 +120,7 @@ def _browse_path_apply(state_key: str, dialog_title: str) -> None:
             "A mappaválasztó nem érhető el ezen a környezeten. Írd be kézzel az útvonalat."
         )
     elif picked:
-        st.session_state[state_key] = picked
+        st.session_state[state_key] = str(normalize_user_path(picked))
 
 
 def main() -> None:
@@ -150,7 +152,7 @@ def main() -> None:
 
     source_str = (st.session_state.get("in_source") or "").strip()
     out_default = (
-        str(Path(source_str).expanduser() / "szétválogatva") if source_str else ""
+        str(normalize_user_path(source_str) / "szétválogatva") if source_str else ""
     )
 
     c_out_a, c_out_b = st.columns([5, 1])
@@ -193,7 +195,7 @@ def main() -> None:
 
     with c3:
         if st.button("Képek betöltése / lista frissítése", type="primary"):
-            src = Path(st.session_state.ps_source).expanduser()
+            src = normalize_user_path(st.session_state.ps_source)
             st.session_state.ps_files = [str(p) for p in list_images(src, recursive)]
             st.session_state.ps_idx = 0
             st.session_state.ps_last_action = None
@@ -214,14 +216,14 @@ def main() -> None:
         st.balloons()
         st.success("Kész — nincs több kép ebben a listában.")
         if st.button("Lista újraépítése (üres forrás ellenőrzéséhez)"):
-            src = Path(st.session_state.ps_source).expanduser()
+            src = normalize_user_path(st.session_state.ps_source)
             st.session_state.ps_files = [str(p) for p in list_images(src, st.session_state.ps_recursive)]
             st.session_state.ps_idx = 0
             st.rerun()
         return
 
     current = Path(files[idx])
-    out_root = Path(st.session_state.ps_out_root).expanduser()
+    out_root = normalize_user_path(st.session_state.ps_out_root)
 
     st.divider()
     left, right = st.columns([1, 1])

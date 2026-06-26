@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Tuple
+from urllib.parse import unquote, urlparse
 
 import cv2
 import imagehash
@@ -39,9 +40,55 @@ PDF_SUFFIX = ".pdf"
 UNASSIGNED = "_nincs_köteg"
 
 
+def normalize_user_path(raw: Path | str) -> Path:
+    """
+    Felhasználói útvonal tisztítása: szóköz, idézőjelek, ``~``, ``file://`` URI.
+    A beírt / bemásolt / tallózott mappaútvonalakhoz használd — nem belső temp útvonalakhoz.
+    """
+    s = str(raw).strip()
+    if not s:
+        return Path(s)
+    if s.lower().startswith("file://"):
+        parsed = urlparse(s)
+        s = unquote(parsed.path)
+        if not s and parsed.netloc:
+            s = unquote(f"//{parsed.netloc}{parsed.path}")
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+        s = s[1:-1].strip()
+    return Path(s).expanduser()
+
+
+def folder_path_error_message(path: Path | str) -> str:
+    """Magyar hibaüzenet, ha az útvonal nem használható forrásmappaként."""
+    path = normalize_user_path(path)
+    try:
+        if not path.exists():
+            return f"Az útvonal nem létezik: {path}"
+        if path.is_file():
+            return f"Fájl van megadva mappa helyett — válassz mappát: {path.name}"
+        if path.is_symlink():
+            try:
+                target = path.resolve()
+                if not target.is_dir():
+                    return f"A link nem mappára mutat: {path} → {target}"
+            except OSError:
+                return f"A link nem olvasható: {path}"
+        if not path.is_dir():
+            return f"A megadott útvonal nem mappa: {path}"
+    except PermissionError:
+        return (
+            f"Nincs jogosultság az útvonal ellenőrzéséhez: {path}\n"
+            "macOS: adj a Terminalnak / Cursornak **Teljes lemezhez való hozzáférést** "
+            "(Rendszerbeállítások → Adatvédelem és biztonság)."
+        )
+    except OSError as e:
+        return f"Az útvonal nem olvasható: {path} ({e.__class__.__name__}: {e})"
+    return f"A megadott útvonal nem mappa: {path}"
+
+
 def norm_path_key(p: Path | str) -> str:
     """Egységes útvonal-kulcs (expanduser) — skip/force és fájllista összevetéséhez."""
-    return str(Path(p).expanduser())
+    return str(normalize_user_path(p))
 
 
 def sort_media_paths_by_name_then_mtime(paths: list[Path]) -> list[Path]:
@@ -91,8 +138,9 @@ def list_sorted_media(source: Path, recursive: bool = False) -> Tuple[list[Path]
     (A korábbi „előbb mtime” rendezés gyakran felborította a kamera-fájlok időrendjét, ha az mtime nem egyezett a fájlnévvel.)
     Vissza: (fájlok, hibaüzenet) — ha a mappa nem olvasható (pl. macOS jogosultság), üres lista + magyarázat.
     """
+    source = normalize_user_path(source)
     if not source.is_dir():
-        return [], "A megadott útvonal nem mappa."
+        return [], folder_path_error_message(source)
 
     items: list[Path] = []
 
@@ -501,7 +549,7 @@ class PlanScanCache:
 
 def _path_match_key(p: Path | str) -> str:
     """Egyező útvonal-kulcs skip/force és fájl összehasonlításhoz (expanduser)."""
-    return str(Path(p).expanduser())
+    return str(normalize_user_path(p))
 
 
 def list_delimiter_followers_preview(

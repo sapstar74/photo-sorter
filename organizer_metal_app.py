@@ -36,8 +36,10 @@ from metal_batch_logic import (
     Segment,
     build_plan,
     execute_plan,
+    folder_path_error_message,
     list_delimiter_followers_preview,
     list_sorted_media,
+    normalize_user_path,
     replay_plan_from_cache,
     safe_folder_name,
     sort_media_paths_by_name_then_mtime,
@@ -300,7 +302,7 @@ def _browse_folder_apply(state_key: str, dialog_title: str) -> None:
             "Írd be kézzel az útvonalat."
         )
     elif picked:
-        st.session_state[state_key] = picked
+        st.session_state[state_key] = str(normalize_user_path(picked))
 
 
 def _folder_path_row(
@@ -795,7 +797,7 @@ def _scan_cache_matches_session(cache: PlanScanCache) -> bool:
     src = (st.session_state.get("_src") or "").strip()
     if not src:
         return False
-    src_exp = str(Path(src).expanduser())
+    src_exp = str(_user_folder_path(src))
     mh = int(st.session_state.get("metal_max_hamming", 18))
     rec = bool(st.session_state.get("metal_recursive_chk", st.session_state.get("_recursive", False)))
     din = float(st.session_state.get("metal_del_inner", 0.92))
@@ -882,7 +884,7 @@ def _rebuild_plan_with_demotions(
             st.session_state.get("metal_recursive_chk", st.session_state.get("_recursive", False))
         )
         inner_ratio = float(st.session_state.get("metal_del_inner", 0.92))
-        src_exp = Path(src).expanduser()
+        src_exp = _user_folder_path(src)
 
         if progress is None:
             try:
@@ -2070,7 +2072,7 @@ def _queue_add_forced_from_browse() -> None:
     skipped_nonfile = 0
     skipped_ext = 0
     for raw in picked:
-        pth = str(Path(raw).expanduser())
+        pth = str(normalize_user_path(raw))
         if not Path(pth).is_file():
             skipped_nonfile += 1
             continue
@@ -2104,7 +2106,7 @@ def _queue_add_forced_from_input() -> None:
     raw = (st.session_state.get("manual_del_one_path") or "").strip()
     if not raw:
         return
-    pth = str(Path(raw).expanduser())
+    pth = str(normalize_user_path(raw))
     if not Path(pth).is_file():
         st.session_state["_manual_del_err"] = "A fájl nem létezik."
         return
@@ -2199,7 +2201,12 @@ def _render_step2_delimiter_finalize(plan: OrganizePlan) -> None:
 
 
 def _norm_path_str(p: Path | str) -> str:
-    return str(Path(p).expanduser())
+    return str(normalize_user_path(p))
+
+
+def _user_folder_path(raw: str) -> Path:
+    """Felhasználói mappaútvonal (beírás / tallózás / session) normalizálása."""
+    return normalize_user_path(raw)
 
 
 def _index_in_ordered_files(ordered_files: list[Path], target: Path) -> int | None:
@@ -2225,7 +2232,7 @@ def _append_missing_forced_delimiter_rows(
     seen = {_norm_path_str(d) for d, _ in rows}
     extra: list[tuple[Path, list[Path]]] = []
     for fp in forced_paths:
-        p = Path(fp).expanduser()
+        p = normalize_user_path(fp)
         sp = _norm_path_str(p)
         if sp in seen:
             continue
@@ -2304,7 +2311,7 @@ def _ordered_media_files_light() -> tuple[list[Path] | None, str | None]:
     src = (st.session_state.get("_src") or "").strip()
     if not src:
         return None, "Hiányzik a forrás útvonal — nem készíthető lista."
-    source = Path(src).expanduser()
+    source = _user_folder_path(src)
     rec = bool(st.session_state.get("metal_recursive_chk", st.session_state.get("_recursive", False)))
     files, list_err = list_sorted_media(source, recursive=rec)
     if list_err:
@@ -2414,7 +2421,7 @@ def _compute_step2_delimiter_table_paths(plan: OrganizePlan) -> tuple[list[Path]
     if not files:
         return [], "Nincs médiafájl a forrásban."
     force_paths = [
-        str(Path(x).expanduser()) for x in (st.session_state.get("_forced_delimiter_paths") or [])
+        str(normalize_user_path(x)) for x in (st.session_state.get("_forced_delimiter_paths") or [])
     ]
     committed_demoted = {
         _norm_path_str(x) for x in (st.session_state.get("_demoted_delimiter_paths") or [])
@@ -2477,7 +2484,7 @@ def _ordered_files_from_cache(cache: PlanScanCache) -> list[Path]:
 
 def _compute_step3_delimiter_preview(plan: OrganizePlan) -> tuple[list[tuple[Path, list[Path]]], str]:
     """Határoló + követő képek sorai és rövid magyarázat a forráshoz (kézi határolók beolvasztva)."""
-    force_paths = [str(Path(x).expanduser()) for x in (st.session_state.get("_forced_delimiter_paths") or [])]
+    force_paths = [str(normalize_user_path(x)) for x in (st.session_state.get("_forced_delimiter_paths") or [])]
     force_set = set(force_paths)
     cache = st.session_state.get("_plan_scan_cache")
     if isinstance(cache, PlanScanCache) and _scan_cache_matches_session(cache):
@@ -2516,7 +2523,7 @@ def _compute_step3_delimiter_preview(plan: OrganizePlan) -> tuple[list[tuple[Pat
     src = (st.session_state.get("_src") or "").strip()
     if not src:
         return [], "Hiányzik a forrás útvonal — nem készíthető előnézet."
-    source = Path(src).expanduser()
+    source = _user_folder_path(src)
     rec = bool(st.session_state.get("metal_recursive_chk", st.session_state.get("_recursive", False)))
     files, list_err = list_sorted_media(source, recursive=rec)
     if list_err:
@@ -2650,7 +2657,7 @@ def _get_step3_ordered_media_files(plan: OrganizePlan) -> list[Path] | None:
     src = (st.session_state.get("_src") or "").strip()
     if not src:
         return None
-    source = Path(src).expanduser()
+    source = _user_folder_path(src)
     rec = bool(st.session_state.get("metal_recursive_chk", st.session_state.get("_recursive", False)))
     files, list_err = list_sorted_media(source, recursive=rec)
     if list_err:
@@ -3291,7 +3298,7 @@ def _render_step5_execute_block() -> None:
                 out_root = Path(tempfile.mkdtemp(prefix="photo_sorter_out_"))
                 copy_mode = True  # a feltöltött forrás temp mappa épségben marad
             else:
-                out_root = Path(st.session_state["_out"]).expanduser()
+                out_root = _user_folder_path(st.session_state["_out"])
                 copy_mode = bool(st.session_state.get("metal_copy_mode", False))
             move_unassigned = bool(st.session_state.get("metal_move_unassigned", False))
             if not move_unassigned:
@@ -3481,12 +3488,12 @@ A forrás fájljai **fájlnév** (lexikografikusan, tipikusan időbélyeg a név
             elif not del_file:
                 st.error("Töltsd fel a határoló **referencia** képet.")
             else:
-                source = Path(src).expanduser()
-                out_root = Path(out).expanduser()
+                source = _user_folder_path(src)
+                out_root = _user_folder_path(out)
                 if not source.is_dir():
-                    st.error("A forrás nem mappa.")
+                    st.error(folder_path_error_message(source))
                 elif not out_root.parent.exists():
-                    st.error("A cél gyökér szülőmappája nem elérhető.")
+                    st.error(f"A cél gyökér szülőmappája nem elérhető: {out_root.parent}")
                 else:
                     tmp_del = _delimiter_temp_from_upload(del_file)
                     del_path = tmp_del

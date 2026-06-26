@@ -2299,6 +2299,105 @@ def test_step3_first_and_mid_segment_names_survive_rebuild() -> None:
         )
 
 
+def test_step3_form_blocks_match_delimiter_preview_rows() -> None:
+    """
+    A 3. lépés „Mappa N — határoló:” blokkok ugyanazt a határolót és szegmenst mutatják,
+    mint a felső „Határolók és közvetlenül követő képek” előnézet N. sora (egyetlen igazságforrás).
+    """
+    from organizer_metal_app import get_step3_tag_form_blocks, _preview_row_segment_indices
+
+    OrganizePlan, make, preview, files = _platefirst_plan_and_preview()
+    plan = OrganizePlan(segments=make(), delimiter_hits=[preview[0][0], preview[1][0]])
+
+    seg_ix = _preview_row_segment_indices(plan, preview, files)
+    orphans, delim_blocks = get_step3_tag_form_blocks(plan, preview, files)
+
+    assert seg_ix == [1, 2]
+    assert [b["si"] for b in orphans] == [0]
+    assert len(delim_blocks) == len(preview)
+
+    for dix, (preview_delim, preview_followers) in enumerate(preview):
+        block = delim_blocks[dix]
+        assert block["dix"] == dix
+        assert block["delim"] == preview_delim
+        assert block["followers"] == preview_followers
+        assert block["si"] == seg_ix[dix]
+
+
+def test_step3_form_blocks_heic_delimiter_first_layout() -> None:
+    """Határoló-ELSŐ elrendezés HEIC határolóval: minden sor 1:1 párosítás, nincs eltolás."""
+    from organizer_metal_app import get_step3_tag_form_blocks, _preview_row_segment_indices
+    from metal_batch_logic import OrganizePlan, Segment
+
+    root = Path("/tmp/photo_sorter_heic_form_blocks")
+    d1 = root / "IMG_9625.HEIC"
+    d2 = root / "IMG_9700.HEIC"
+    pA, pB = root / "IMG_9626.HEIC", root / "IMG_9701.HEIC"
+    files = [d1, pA, d2, pB]
+    preview = [(d1, [pA]), (d2, [pB])]
+    plan = OrganizePlan(
+        segments=[
+            Segment(folder_key="A", plate_image=pA, ocr_raw="A", photos=[pA], closed_by_delimiter=d2),
+            Segment(folder_key="B", plate_image=pB, ocr_raw="B", photos=[pB], closed_by_delimiter=None),
+        ],
+        delimiter_hits=[d1, d2],
+    )
+
+    seg_ix = _preview_row_segment_indices(plan, preview, files)
+    assert seg_ix == [0, 1]
+
+    orphans, delim_blocks = get_step3_tag_form_blocks(plan, preview, files)
+    assert orphans == []
+    assert [b["delim"] for b in delim_blocks] == [d1, d2]
+    assert [b["si"] for b in delim_blocks] == [0, 1]
+    assert delim_blocks[0]["delim"].name == "IMG_9625.HEIC"
+
+
+def test_step5_preview_respects_delimiter_row_segment_mapping() -> None:
+    """Az 5. lépés a határoló-sor→szegmens párosítás szerint alkalmazza a kézi neveket."""
+    import organizer_metal_app as app_mod
+    from organizer_metal_app import (
+        apply_step3_tag_edits_to_plan,
+        get_step3_tag_form_blocks,
+        build_approved_folder_names,
+        _STEP3_TAGS_BY_SEGMENT_KEY,
+        _segment_identity_keys,
+    )
+
+    OrganizePlan, make, preview, files = _platefirst_plan_and_preview()
+    plan = OrganizePlan(segments=make(), delimiter_hits=[preview[0][0], preview[1][0]])
+    orphans, delim_blocks = get_step3_tag_form_blocks(plan, preview, files)
+    assert orphans and delim_blocks
+
+    orphan_si = int(orphans[0]["si"])
+    dix_for_seg2 = next(int(b["dix"]) for b in delim_blocks if b["si"] == 2)
+    assert dix_for_seg2 == 1
+
+    tag_by_seg = {orphan_si: "ELSO_KEZI"}
+    tag_by_dix = {dix_for_seg2: "HARMADIK"}
+    applied = apply_step3_tag_edits_to_plan(
+        plan, tag_by_dix=tag_by_dix, tag_by_seg=tag_by_seg, preview_rows=preview, files_ord=files
+    )
+    names = build_approved_folder_names(applied)
+    assert names[orphan_si] == "ELSO_KEZI"
+    assert names[2] == "HARMADIK-xx"
+    assert names[1] == "2"
+
+    store: dict[str, str] = {}
+    for sid in _segment_identity_keys(applied.segments[orphan_si]):
+        store[sid] = "ELSO_KEZI"
+    for sid in _segment_identity_keys(applied.segments[2]):
+        store[sid] = "HARMADIK"
+    app_mod.st.session_state = {  # type: ignore[assignment]
+        "_plan": applied,
+        _STEP3_TAGS_BY_SEGMENT_KEY: store,
+    }
+    exec_names = build_approved_folder_names(
+        applied, tag_by_segment=app_mod.st.session_state.get(_STEP3_TAGS_BY_SEGMENT_KEY) or {}
+    )
+    assert exec_names == ["ELSO_KEZI", "2", "HARMADIK"]
+
+
 def test_step3_no_segments_notice_messages() -> None:
     """0 TAG/mappa szegmens esetén a 3. lépés egyértelmű, mód-tudatos útmutatót ad (nem 'forrásmappa')."""
     from organizer_metal_app import step3_no_segments_notice
@@ -2657,6 +2756,9 @@ if __name__ == "__main__":
     test_segment_index_maps_displayed_follower_not_closing()
     test_step3_names_survive_plate_first_no_leading_delimiter()
     test_step3_first_and_mid_segment_names_survive_rebuild()
+    test_step3_form_blocks_match_delimiter_preview_rows()
+    test_step3_form_blocks_heic_delimiter_first_layout()
+    test_step5_preview_respects_delimiter_row_segment_mapping()
     test_safe_image_display_helpers()
     test_thumbnail_decode_cache_caps_size_and_keys_on_stat()
     test_heic_heif_extensions_accepted_everywhere()

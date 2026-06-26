@@ -1222,6 +1222,38 @@ def _preview_row_segment_indices(
     return seg_ix
 
 
+def get_step3_tag_form_blocks(
+    plan: OrganizePlan,
+    preview_rows: list[tuple[Path, list[Path]]],
+    files_ord: list[Path] | None,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """
+    A 3. lépés **egyetlen** határoló→szegmens párosítása: ugyanaz, mint a „Határolók és
+    közvetlenül követő képek” előnézet és az ``apply_step3_tag_edits_to_plan`` / 5. lépés.
+
+    Vissza: ``(orphan_blocks, delimiter_blocks)`` — az árva szegmensek, majd a határoló-sorok
+    **pontosan** a ``preview_rows`` sorrendjében (``dix`` = a felső előnézet „Határoló N” sorszáma).
+    """
+    seg_ix = _preview_row_segment_indices(plan, preview_rows, files_ord)
+    matched_si = {si for si in seg_ix if si is not None}
+    orphan_blocks: list[dict[str, object]] = [
+        {"si": si, "segment": plan.segments[si]}
+        for si in range(len(plan.segments))
+        if si not in matched_si
+    ]
+    delimiter_blocks: list[dict[str, object]] = []
+    for dix, (delim, followers) in enumerate(preview_rows):
+        delimiter_blocks.append(
+            {
+                "dix": dix,
+                "delim": delim,
+                "followers": followers,
+                "si": seg_ix[dix],
+            }
+        )
+    return orphan_blocks, delimiter_blocks
+
+
 def _normalize_tag_text(raw: object, fallback: str) -> str:
     text = (raw or "").strip() if isinstance(raw, str) else str(raw or "").strip()
     return text or fallback
@@ -2872,47 +2904,25 @@ def _render_step3_tag_mappa_forms(plan: OrganizePlan) -> None:
         else:
             st.info(msg)
         return
-    seg_ix_preview: list[int | None] = []
-    for dix, (delim, followers) in enumerate(preview_rows):
-        nd_next = preview_rows[dix + 1][0] if dix + 1 < n_prev else None
-        seg_ix_preview.append(
-            _segment_index_for_tag_block(
-                plan,
-                delim,
-                followers,
-                next_delimiter=nd_next,
-                files_ordered=files_ord,
-            )
-        )
-    # Szegmens → az őt megjelenítő (első) határoló-sor. Így MINDEN mappához (szegmenshez) pontosan
-    # EGY szerkesztő tartozik — a határolóval lezártakhoz a határoló-sor előnézetével, a határoló
-    # nélküliekhez (lista eleji / párosítatlan) a fémlap + saját képeivel. Nincs külön szakasz.
-    row_for_si: dict[int, int] = {}
-    for dix, si in enumerate(seg_ix_preview):
-        if si is not None and si not in row_for_si:
-            row_for_si[si] = dix
+    orphan_blocks, delimiter_blocks = get_step3_tag_form_blocks(plan, preview_rows, files_ord)
 
     st.markdown("##### TAG / mappa szegmensek — **minden mappa neve szerkeszthető**")
     st.caption(
         f"**Mappák (szegmensek):** {len(plan.segments)} db; **határoló sorok** (felül): {n_prev} db. "
+        "A határoló-soros blokkok **ugyanabban a sorrendben** jelennek meg, mint a fenti "
+        "„Határolók és közvetlenül követő képek” előnézet (``Mappa N`` = ``Határoló N``). "
         "Az **alapértelmezett név a sorszám** (1, 2, 3, …) — írd át tetszőleges névre; OCR-szöveg csak tippként jelenik meg, sosem lesz mappanév. "
-        "**Minden mappa** átnevezhető — a határoló nélküli (lista eleji / párosítatlan / záró) mappák is. "
+        "**Minden mappa** átnevezhető — a határoló nélküli (lista eleji / párosítatlan) mappák külön blokkban. "
         "**Összes kép a mappában** = a jelen határoló után a következő határolóig tartó kép-sáv (a következő határoló kép nélkül). "
         "A név szerkesztésekor csak a szövegmező fut újra; a beírt név a 4. és 5. lépésbe is átszinkronizál."
     )
 
-    for si, seg in enumerate(plan.segments):
-        dix = row_for_si.get(si)
-        if dix is not None:
-            delim = preview_rows[dix][0]
-            st.markdown(
-                f"#### Mappa {si + 1} — határoló: `{html.escape(delim.name)}`",
-                unsafe_allow_html=True,
-            )
-            st.markdown(f"**Határoló** (határoló + első követő)")
-            thumbs = _tag_segment_anchor_thumbnails(dix, preview_rows)
-            captions = ["Határoló", "első követő"]
-        else:
+    if orphan_blocks:
+        st.markdown("###### Mappák határoló nélkül (lista eleje / párosítatlan)")
+        for block in orphan_blocks:
+            si = int(block["si"])  # type: ignore[arg-type]
+            seg = block["segment"]  # type: ignore[assignment]
+            assert isinstance(seg, Segment)
             st.markdown(
                 f"#### Mappa {si + 1} — *(nincs határoló kép)*",
                 unsafe_allow_html=True,
@@ -2923,34 +2933,71 @@ def _render_step3_tag_mappa_forms(plan: OrganizePlan) -> None:
                 for p in ([seg.plate_image] + list(seg.photos[:1]))
                 if _path_image_file_ok(p)
             ]
-            captions = ["fémlap", "első kép"]
-
-        if thumbs:
-            tc = st.columns(len(thumbs))
-            for ci, p in enumerate(thumbs):
-                with tc[ci]:
-                    cap = captions[ci] if ci < len(captions) else p.name
-                    if not _safe_st_image_path(
-                        p,
-                        caption=f"{cap}: {p.name}"[:56],
-                        width=_GALLERY_COL_THUMB_WIDTH,
-                        missing_label=str(p),
-                    ):
-                        st.caption(str(p))
-        else:
-            st.caption("Nincs előnézeti kép ehhez a mappához.")
-
-        _fragment_step3_segment_name_editor(plan, si)
-        if dix is not None:
-            _render_step3_folder_photos_expander(
-                seg,
-                dix=dix,
-                preview_rows=preview_rows,
-                files_ordered=files_ord,
-                index_map=file_index_map,
-            )
-        else:
+            if thumbs:
+                tc = st.columns(len(thumbs))
+                for ci, p in enumerate(thumbs):
+                    with tc[ci]:
+                        cap = "fémlap" if ci == 0 else "első kép"
+                        if not _safe_st_image_path(
+                            p,
+                            caption=f"{cap}: {p.name}"[:56],
+                            width=_GALLERY_COL_THUMB_WIDTH,
+                            missing_label=str(p),
+                        ):
+                            st.caption(str(p))
+            else:
+                st.caption("Nincs előnézeti kép ehhez a mappához.")
+            _fragment_step3_segment_name_editor(plan, si)
             _render_step3_folder_photos_expander(seg)
+
+    if delimiter_blocks:
+        if orphan_blocks:
+            st.markdown("###### Mappák határoló sorrendben (megegyezik a fenti előnézettel)")
+        for block in delimiter_blocks:
+            dix = int(block["dix"])  # type: ignore[arg-type]
+            delim = block["delim"]  # type: ignore[assignment]
+            si = block["si"]
+            assert isinstance(delim, Path)
+            st.markdown(
+                f"#### Mappa {dix + 1} — határoló: `{html.escape(delim.name)}`",
+                unsafe_allow_html=True,
+            )
+            st.markdown(f"**Határoló {dix + 1}** (határoló + első követő)")
+            thumbs = _tag_segment_anchor_thumbnails(dix, preview_rows)
+            if thumbs:
+                tc = st.columns(len(thumbs))
+                for ci, p in enumerate(thumbs):
+                    with tc[ci]:
+                        cap = f"Határoló {dix + 1}" if ci == 0 else "első követő"
+                        if not _safe_st_image_path(
+                            p,
+                            caption=f"{cap}: {p.name}"[:56],
+                            width=_GALLERY_COL_THUMB_WIDTH,
+                            missing_label=str(p),
+                        ):
+                            st.caption(str(p))
+            else:
+                st.caption("Nincs előnézeti kép ehhez a sorhoz.")
+            if si is not None:
+                seg = plan.segments[int(si)]
+                _fragment_step3_segment_name_editor(plan, int(si))
+                _render_step3_folder_photos_expander(
+                    seg,
+                    dix=dix,
+                    preview_rows=preview_rows,
+                    files_ordered=files_ord,
+                    index_map=file_index_map,
+                )
+            elif st.session_state.get("_delimiter_demotions_dirty"):
+                st.warning(
+                    "Ehhez a sorhoz a terv még a **régi** határoló-listára épül — a **3. lépésben** "
+                    "**Képek frissítése**, majd a **4 — Terv véglegesítése → Terv újraszámolása**."
+                )
+            else:
+                st.info(
+                    "Ehhez a határoló sorhoz nem párosítható külön terv-szegmens (pl. záró / egymás utáni "
+                    "határoló). A kapcsolódó mappa automatikus sorszám-alapú nevet kap."
+                )
 
 
 def _render_step3_tag_mappa(plan: OrganizePlan) -> None:
@@ -3110,10 +3157,10 @@ def _distinct_folder_names_with_counts(names: list[str]) -> list[tuple[str, int]
 def _live_tag_by_segment_from_plan(prepared: OrganizePlan) -> dict[str, str]:
     """
     A JELENLEGI (élő) kézi mappanév-térkép a már feldolgozott tervből (widget + stabil mentés
-    egyesítve). A ``build_approved_folder_names`` ``tag_by_segment`` paramétere a kézi nevek
-    egyetlen megbízható forrása; az előnézet **persist=False** miatt a session-snapshot ott
-    elavult lehet, ezért a ``prepared`` tervből számoljuk újra (mellékhatás nélkül), így az
-    előnézet a **most beírt** neveket mutatja, nem egy korábbit.
+    egyesítve az ``_apply_ocr_edits_to_plan``-ben). A ``build_approved_folder_names``
+    ``tag_by_segment`` paramétere a kézi nevek megbízható forrása; az előnézet
+    ``persist=False`` mellett a nyers session-snapshot elavult lehet, ezért a ``prepared``
+    tervből számoljuk újra (mellékhatás nélkül).
     """
     try:
         pr, _ = get_step3_delimiter_preview_rows(prepared)

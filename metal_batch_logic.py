@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import unicodedata
 import uuid
 from functools import partial
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -40,9 +41,106 @@ PDF_SUFFIX = ".pdf"
 UNASSIGNED = "_nincs_köteg"
 
 
+def _unicode_path_variants(path: Path) -> list[Path]:
+    """NFC/NFD változatok — macOS APFS gyakran NFD-ben tárol fájlneveket."""
+    s = str(path)
+    variants = [path]
+    for form in ("NFC", "NFD"):
+        candidate = Path(unicodedata.normalize(form, s))
+        if candidate not in variants:
+            variants.append(candidate)
+    return variants
+
+
+def _path_exists(path: Path) -> bool:
+    return any(p.exists() for p in _unicode_path_variants(path))
+
+
+def _match_dir_entry(parent: Path, name: str) -> Path | None:
+    """Szülőmappában keresés pontos / NFC / NFD egyezéssel."""
+    target_nfc = unicodedata.normalize("NFC", name)
+    target_nfd = unicodedata.normalize("NFD", name)
+    try:
+        for entry in parent.iterdir():
+            en = entry.name
+            if (
+                en == name
+                or unicodedata.normalize("NFC", en) == target_nfc
+                or unicodedata.normalize("NFD", en) == target_nfd
+            ):
+                return entry
+    except (OSError, PermissionError):
+        pass
+    return None
+
+
+def _resolve_existing_path(path: Path) -> Path | None:
+    """
+    Létező útvonal feloldása: teljes NFC/NFD, szegmensenkénti egyezés,
+    illetve „input - mappa” → „mappa” alias (gyakori bemásolási hiba).
+    """
+    for candidate in _unicode_path_variants(path):
+        if candidate.exists():
+            return candidate
+
+    parts = path.parts
+    if len(parts) < 2:
+        return None
+
+    resolved = Path(parts[0])
+    for part in parts[1:]:
+        target = resolved / part
+        if _path_exists(target):
+            resolved = next(p for p in _unicode_path_variants(target) if p.exists())
+            continue
+
+        matched = _match_dir_entry(resolved, part) if resolved.is_dir() else None
+        if matched is not None:
+            resolved = matched
+            continue
+
+        if " - " in part and resolved.is_dir():
+            suffix = part.split(" - ", 1)[1]
+            alias = resolved / suffix
+            if _path_exists(alias):
+                resolved = next(p for p in _unicode_path_variants(alias) if p.exists())
+                continue
+            matched = _match_dir_entry(resolved, suffix)
+            if matched is not None:
+                resolved = matched
+                continue
+
+        return None
+
+    return resolved if resolved.exists() else None
+
+
+def _suggest_alternate_folder(path: Path) -> Path | None:
+    """Ha a megadott útvonal nem létezik, javasolt közeli mappa (csak hibaüzenethez)."""
+    if path.exists():
+        return None
+    parent = path.parent
+    if not parent.is_dir():
+        return None
+    name = path.name
+    if " - " in name:
+        suffix = name.split(" - ", 1)[1]
+        candidate = parent / suffix
+        if candidate.is_dir():
+            return candidate
+        matched = _match_dir_entry(parent, suffix)
+        if matched is not None and matched.is_dir():
+            return matched
+    matched = _match_dir_entry(parent, name)
+    if matched is not None and matched.is_dir():
+        return matched
+    return None
+
+
 def normalize_user_path(raw: Path | str) -> Path:
     """
-    Felhasználói útvonal tisztítása: szóköz, idézőjelek, ``~``, ``file://`` URI.
+    Felhasználói útvonal tisztítása: szóköz, idézőjelek, ``~``, ``file://`` URI,
+    macOS Unicode (NFC/NFD) és gyakori aliasok (pl. ``input - mappa`` → ``mappa``).
     A beírt / bemásolt / tallózott mappaútvonalakhoz használd — nem belső temp útvonalakhoz.
     """
     s = str(raw).strip()
@@ -55,7 +153,11 @@ def normalize_user_path(raw: Path | str) -> Path:
             s = unquote(f"//{parsed.netloc}{parsed.path}")
     if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
         s = s[1:-1].strip()
-    return Path(s).expanduser()
+    path = Path(s).expanduser()
+    if path.exists():
+        return path
+    resolved = _resolve_existing_path(path)
+    return resolved if resolved is not None else path
 
 
 def folder_path_error_message(path: Path | str) -> str:
@@ -63,9 +165,17 @@ def folder_path_error_message(path: Path | str) -> str:
     path = normalize_user_path(path)
     try:
         if not path.exists():
+            alt = _suggest_alternate_folder(path)
+            if alt is not None:
+                return (
+                    f"Az útvonal nem létezik: {path}\n"
+                    f"Talán ezt érted: {alt}"
+                )
             return f"Az útvonal nem létezik: {path}"
         if path.is_file():
-            return f"Fájl van megadva mappa helyett — válassz mappát: {path.name}"
+            return (
+                f"Fájl van megadva mappa helyett — a szülő mappát használd: {path.parent}"
+            )
         if path.is_symlink():
             try:
                 target = path.resolve()

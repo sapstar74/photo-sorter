@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 import time
+import unicodedata
 from pathlib import Path
 
 from metal_batch_logic import (
@@ -32,7 +33,28 @@ def test_folder_path_error_message_distinguishes_missing_and_file() -> None:
         f = root / "egy_fajl.txt"
         f.write_text("x")
         assert "Fájl van megadva" in folder_path_error_message(f)
+        assert "szülő mappát" in folder_path_error_message(f)
         assert folder_path_error_message(f'"{root}"') == folder_path_error_message(root)
+
+
+def test_normalize_user_path_unicode_nfc_nfd() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        nfd_name = unicodedata.normalize("NFD", "NAGYLÉÁLLÁS")
+        nfd_dir = Path(td) / nfd_name
+        nfd_dir.mkdir()
+        nfc_path = Path(td) / unicodedata.normalize("NFC", "NAGYLÉÁLLÁS")
+        assert normalize_user_path(nfc_path).is_dir()
+        assert normalize_user_path(str(nfc_path)).exists()
+
+
+def test_normalize_user_path_resolves_input_prefix_alias() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        actual = Path(td) / "IMG_9728_tomorites"
+        actual.mkdir()
+        wrong = Path(td) / "input - IMG_9728_tomorites"
+        resolved = normalize_user_path(wrong)
+        assert resolved.is_dir()
+        assert resolved.name == "IMG_9728_tomorites"
 
 
 def test_list_sorted_media_accepts_quoted_path() -> None:

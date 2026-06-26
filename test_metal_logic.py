@@ -907,6 +907,51 @@ def test_safe_image_display_helpers() -> None:
     assert "str" not in w_ann
 
 
+def test_thumbnail_decode_cache_caps_size_and_keys_on_stat() -> None:
+    """A miniatűr-dekódolás cache-elt: a forrást a megjelenítési méret fölé zsugorítja
+    (memória-korlát), a kulcs pedig az útvonal + (méret, mtime_ns), így a fájl változására
+    érvénytelenít (nincs elavult miniatűr)."""
+    import os
+
+    from PIL import Image
+
+    import organizer_metal_app as app_mod
+    from organizer_metal_app import (
+        _THUMB_DECODE_MAX_DIM,
+        _image_stat_sig,
+        _load_rgb_image,
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        big = root / "big.png"
+        Image.new("RGB", (1600, 1200), color=(200, 50, 50)).save(big)
+
+        sig1 = _image_stat_sig(big)
+        assert isinstance(sig1, tuple) and len(sig1) == 2
+
+        loaded = _load_rgb_image(big)
+        assert loaded is not None
+        # A hosszabb él a max. miniatűr-élhossz alá került (a kijelzés ≤128 px, ez bőven elég).
+        assert max(loaded.size) <= _THUMB_DECODE_MAX_DIM
+        assert min(loaded.size) > 0
+
+        # Ugyanaz a fájl → ugyanaz a kulcs → konzisztens eredmény (cache visszaadja).
+        again = _load_rgb_image(big)
+        assert again is not None and again.size == loaded.size
+
+        # A fájl tartalmának/idejének változására a kulcs (stat aláírás) változik.
+        t = os.stat(big).st_mtime + 100
+        Image.new("RGB", (640, 480), color=(10, 10, 10)).save(big)
+        os.utime(big, (t, t))
+        sig2 = _image_stat_sig(big)
+        assert sig2 is not None and sig2 != sig1
+
+        # Hiányzó / olvashatatlan útvonal aláírása None.
+        assert _image_stat_sig(root / "nincs.png") is None
+        assert app_mod._decode_thumb_rgb_cached is not None
+
+
 def test_heic_heif_extensions_accepted_everywhere() -> None:
     """A HEIC/HEIF kiterjesztés a felfedezésben, az app.py listájában és a feltöltő típusokban is benne van."""
     # Felfedezés (forrásmappa-szkennelés + határoló-felismerés a metal_batch_logic-ben).
@@ -2368,6 +2413,7 @@ if __name__ == "__main__":
     test_step3_names_survive_plate_first_no_leading_delimiter()
     test_step3_first_and_mid_segment_names_survive_rebuild()
     test_safe_image_display_helpers()
+    test_thumbnail_decode_cache_caps_size_and_keys_on_stat()
     test_heic_heif_extensions_accepted_everywhere()
     test_heif_opener_registered_and_heic_roundtrip()
     test_sanitize_delimiter_preview_rows()

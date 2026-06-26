@@ -165,18 +165,51 @@ def _pil_positive_size(img: Image.Image) -> bool:
         return False
 
 
-def _load_rgb_image(path: Path) -> Image.Image | None:
-    if not _path_image_file_ok(path):
-        return None
+# A megjelenített képek mind miniatűrök (max. ``_GALLERY_COL_THUMB_WIDTH`` = 128 px széles),
+# ezért a dekódolt forrást ekkora maximális élhosszra zsugorítjuk a cache-elés előtt: így a
+# memória korlátos marad (egy nagy HEIC sem foglal 12 MP-nyi RGB-t), a megjelenítés minősége
+# pedig változatlan (jóval a 128 px-es kijelzés fölött vágunk).
+_THUMB_DECODE_MAX_DIM = 512
+
+
+def _image_stat_sig(path: Path) -> tuple[int, int] | None:
+    """A fájl identitása a cache kulcsához: (méret, mtime_ns). None, ha nem olvasható."""
     try:
-        with Image.open(path) as im:
+        stt = path.stat()
+    except OSError:
+        return None
+    return (int(stt.st_size), int(stt.st_mtime_ns))
+
+
+@st.cache_data(show_spinner=False, max_entries=2048)
+def _decode_thumb_rgb_cached(path_str: str, stat_sig: tuple[int, int]) -> Image.Image | None:
+    """
+    Egy útvonal RGB miniatűrje **cache-elve** — a kulcs az útvonal + (méret, mtime_ns), így a
+    dekódolás (HEIC esetén kifejezetten drága) **menetenként egyszer** fut, nem minden
+    Streamlit rerunkor / minden szegmensnél újra. A ``stat_sig`` változására (a fájl módosul)
+    a cache automatikusan érvénytelenít, így nincs elavult miniatűr.
+    """
+    try:
+        with Image.open(path_str) as im:
             im = ImageOps.exif_transpose(im)
             rgb = im.convert("RGB")
             if not _pil_positive_size(rgb):
                 return None
-            return rgb.copy()
+            rgb.thumbnail((_THUMB_DECODE_MAX_DIM, _THUMB_DECODE_MAX_DIM))
+            if not _pil_positive_size(rgb):
+                return None
+            return rgb
     except Exception:
         return None
+
+
+def _load_rgb_image(path: Path) -> Image.Image | None:
+    if not _path_image_file_ok(path):
+        return None
+    sig = _image_stat_sig(path)
+    if sig is None:
+        return None
+    return _decode_thumb_rgb_cached(str(path), sig)
 
 
 def _load_rgb_from_bytes(data: bytes) -> Image.Image | None:

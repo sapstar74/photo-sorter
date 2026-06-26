@@ -383,6 +383,77 @@ def test_step2_candidate_list_filters_committed_demotions() -> None:
     assert filtered_delims == {_norm_path_str(d1)}
 
 
+def test_step2_table_paths_from_scan_cache_uses_candidates() -> None:
+    """2. lépés táblázat: delimiter_candidates + plan hit, nem teljes fájllista hash-bejárás."""
+    import imagehash
+
+    from organizer_metal_app import _norm_path_str, _step2_table_paths_from_scan_cache
+    from metal_batch_logic import OrganizePlan, PlanScanCache
+
+    root = Path("/tmp/photo_sorter_test_step2_table_cache_branch")
+    d1 = root / "01_delim.jpg"
+    d2 = root / "02_delim.jpg"
+    p1 = root / "03_plate.jpg"
+    p2 = root / "04_plate.jpg"
+    files = [d1, p1, d2, p2]
+    ref = imagehash.hex_to_hash("0000000000000000")
+    cache = PlanScanCache(
+        files=files,
+        hash_by_path={},
+        ref_phash=ref,
+        ref_ahash=ref,
+        max_hamming=12,
+        inner_ratio=0.92,
+        source_str="/tmp/irrelevant",
+        recursive=False,
+        delimiter_candidates={str(d1.expanduser()), str(d2.expanduser())},
+        files_sorted_by_name_mtime=True,
+        ocr_by_path={},
+    )
+    plan = OrganizePlan(segments=[], delimiter_hits=[d1, d2])
+    paths = _step2_table_paths_from_scan_cache(plan, files, cache, [], set())
+    assert [_norm_path_str(p) for p in paths] == [_norm_path_str(d1), _norm_path_str(d2)]
+
+    filtered = _step2_table_paths_from_scan_cache(
+        plan, files, cache, [], {_norm_path_str(d2)}
+    )
+    assert [_norm_path_str(p) for p in filtered] == [_norm_path_str(d1)]
+
+
+def test_step2_table_paths_append_forced_outside_scan() -> None:
+    """Kényszerített határoló a scan listán kívül is megjelenik a 2. lépés táblázatában."""
+    import imagehash
+
+    from organizer_metal_app import _norm_path_str, _step2_table_paths_from_scan_cache
+    from metal_batch_logic import OrganizePlan, PlanScanCache
+
+    root = Path("/tmp/photo_sorter_test_step2_forced_extra")
+    root.mkdir(parents=True, exist_ok=True)
+    d1 = root / "in_scan_delim.jpg"
+    forced = root / "manual_only_delim.jpg"
+    d1.touch()
+    forced.touch()
+    files = [d1]
+    ref = imagehash.hex_to_hash("0000000000000000")
+    cache = PlanScanCache(
+        files=files,
+        hash_by_path={},
+        ref_phash=ref,
+        ref_ahash=ref,
+        max_hamming=12,
+        inner_ratio=0.92,
+        source_str="/tmp/irrelevant",
+        recursive=False,
+        delimiter_candidates={str(d1.expanduser())},
+        files_sorted_by_name_mtime=True,
+        ocr_by_path={},
+    )
+    plan = OrganizePlan(segments=[], delimiter_hits=[d1])
+    force_paths = [str(forced.expanduser())]
+    paths = _step2_table_paths_from_scan_cache(plan, files, cache, force_paths, set())
+    assert [_norm_path_str(p) for p in paths] == [_norm_path_str(d1), _norm_path_str(forced)]
+
+
 def test_demoted_delimiter_excluded_from_preview_rows() -> None:
     from organizer_metal_app import (
         _list_delimiter_followers_fallback_from_plan,
@@ -2378,6 +2449,8 @@ if __name__ == "__main__":
     test_step3_override_survives_multiple_rebuild_roundtrips()
     test_delimiter_table_paths_from_fallback()
     test_step2_candidate_list_filters_committed_demotions()
+    test_step2_table_paths_from_scan_cache_uses_candidates()
+    test_step2_table_paths_append_forced_outside_scan()
     test_demoted_delimiter_excluded_from_preview_rows()
     test_demoted_paths_from_delimiter_paths()
     test_flush_pending_rerun_only_scope()

@@ -69,6 +69,7 @@ def _register_heif_opener() -> None:
 _register_heif_opener()
 
 _CACHED_DELIM_PREVIEW_SLOT = "_cached_step3_delim_preview_v1"
+_CACHED_STEP2_TABLE_SLOT = "_cached_step2_delim_table_v1"
 _STEP3_TAGS_BY_DELIM_KEY = "_step3_tags_by_delim_v1"
 _STEP3_TAGS_BY_PLATE_KEY = "_step3_tags_by_plate_v1"
 _STEP3_TAGS_BY_SEGMENT_KEY = "_step3_tags_by_segment_v1"
@@ -744,6 +745,7 @@ def _apply_step3_refresh_delimiter_images() -> None:
 def _clear_plan_scan_cache() -> None:
     st.session_state.pop("_plan_scan_cache", None)
     st.session_state.pop(_CACHED_DELIM_PREVIEW_SLOT, None)
+    bust_step2_delimiter_table_cache()
 
 
 def _rebuild_plan_core(
@@ -2118,13 +2120,20 @@ def _queue_add_forced_from_input() -> None:
     st.session_state["_delimiter_demotions_dirty"] = True
 
 
+@st.fragment
+def _fragment_step2_delimiter_table(plan: OrganizePlan) -> None:
+    """Pipák és táblázat fragmentben — egy pipa nem futtatja újra a tallózás blokkot."""
+    _render_step2_unified_delimiter_table(plan)
+    _flush_pending_rerun(only_scope="fragment")
+
+
 def _render_step2_delimiter_finalize(plan: OrganizePlan) -> None:
     st.subheader("2. Határolóképek véglegesítése")
     st.caption(
         "Itt csak **jelölhetsz** (nem határoló lista, további határolók felvétele). "
         "A terv **újraszámolása** a **4 — Terv véglegesítése** lapon történik."
     )
-    _render_step2_unified_delimiter_table(plan)
+    _fragment_step2_delimiter_table(plan)
 
     st.divider()
     st.markdown("##### További határolók felvétele")
@@ -2187,13 +2196,6 @@ def _render_step2_delimiter_finalize(plan: OrganizePlan) -> None:
             _clear_step2_demotion_checkbox_keys()
             _clear_step3_demotion_checkbox_keys()
             bust_step3_delimiter_preview_cache()
-
-
-@st.fragment
-def _fragment_step2_delimiter_finalize(plan: OrganizePlan) -> None:
-    """A 2. lap táblázata és pipái fragmentben: egy kattintás csak ezt a részt futtatja újra, nem a 3–5. lapot."""
-    _render_step2_delimiter_finalize(plan)
-    _flush_pending_rerun(only_scope="fragment")
 
 
 def _norm_path_str(p: Path | str) -> str:
@@ -2310,7 +2312,96 @@ def _ordered_media_files_light() -> tuple[list[Path] | None, str | None]:
     return sort_media_paths_by_name_then_mtime(files), None
 
 
-def _get_delimiter_table_paths(plan: OrganizePlan) -> tuple[list[Path], str]:
+def _step2_table_paths_from_scan_cache(
+    plan: OrganizePlan,
+    files_ordered: list[Path],
+    cache: PlanScanCache,
+    force_paths: list[str],
+    committed_demoted: set[str],
+) -> list[Path]:
+    """
+    Határoló útvonalak a 2. lépés táblázatához — O(darabszám) a teljes fájllista hash-bejárása helyett.
+
+    A ``delimiter_candidates`` már tartalmazza az 1. lépés hash-találatait; csak plan hit + force kell még.
+    """
+    force_set = {_norm_path_str(x) for x in force_paths}
+    hit_str = {_norm_path_str(h) for h in plan.delimiter_hits}
+    baseline_delims = {_norm_path_str(x) for x in cache.delimiter_candidates}
+    delim_ns = (baseline_delims | hit_str | force_set) - committed_demoted
+
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for f in files_ordered:
+        if f.suffix.lower() not in mbl.IMAGE_SUFFIXES:
+            continue
+        ns = _norm_path_str(f)
+        if ns in delim_ns and ns not in seen:
+            paths.append(f)
+            seen.add(ns)
+
+    def is_d(f: Path) -> bool:
+        if f.suffix.lower() not in mbl.IMAGE_SUFFIXES:
+            return False
+        sf = _norm_path_str(f)
+        if sf in committed_demoted:
+            return False
+        if sf in force_set:
+            return True
+        if sf in baseline_delims:
+            return True
+        return sf in hit_str
+
+    rows = [(p, []) for p in paths]
+    rows = _append_missing_forced_delimiter_rows(
+        rows, force_paths, files_ordered, is_d, following_max=0
+    )
+    return [p for p, _ in rows]
+
+
+def _step2_table_paths_from_fallback(
+    plan: OrganizePlan,
+    files: list[Path],
+    force_paths: list[str],
+    committed_demoted: set[str],
+) -> list[Path]:
+    force_set = {_norm_path_str(x) for x in force_paths}
+
+    def is_d(f: Path) -> bool:
+        if f.suffix.lower() not in mbl.IMAGE_SUFFIXES:
+            return False
+        sf = _norm_path_str(f)
+        if sf in committed_demoted:
+            return False
+        if sf in force_set:
+            return True
+        return sf in {_norm_path_str(h) for h in plan.delimiter_hits}
+
+    rows = [(f, []) for f in files if is_d(f)]
+    rows = _append_missing_forced_delimiter_rows(rows, force_paths, files, is_d, following_max=0)
+    return [p for p, _ in rows]
+
+
+def _step2_delimiter_table_cache_key(plan: OrganizePlan) -> tuple:
+    """Élő pipák (piszkozat) nem invalidálják — a sorok kattintásig maradnak."""
+    gen = int(st.session_state.get("_plan_generation", 0))
+    committed = tuple(
+        sorted(_norm_path_str(x) for x in (st.session_state.get("_demoted_delimiter_paths") or []))
+    )
+    forced = tuple(
+        sorted(_norm_path_str(x) for x in (st.session_state.get("_forced_delimiter_paths") or []))
+    )
+    hits = tuple(_norm_path_str(h) for h in plan.delimiter_hits)
+    src = (st.session_state.get("_src") or "").strip()
+    rec = bool(st.session_state.get("metal_recursive_chk", st.session_state.get("_recursive", False)))
+    mh = int(st.session_state.get("metal_max_hamming", 18))
+    din = float(st.session_state.get("metal_del_inner", 0.92))
+    cache = st.session_state.get("_plan_scan_cache")
+    c_ok = isinstance(cache, PlanScanCache) and _scan_cache_matches_session(cache)
+    nf = len(cache.files) if c_ok and isinstance(cache, PlanScanCache) else -1
+    return (gen, src, rec, mh, round(din, 4), committed, forced, hits, c_ok, nf)
+
+
+def _compute_step2_delimiter_table_paths(plan: OrganizePlan) -> tuple[list[Path], str]:
     """
     Határoló útvonalak a 2. lépés pipás táblázatához.
 
@@ -2325,60 +2416,44 @@ def _get_delimiter_table_paths(plan: OrganizePlan) -> tuple[list[Path], str]:
     force_paths = [
         str(Path(x).expanduser()) for x in (st.session_state.get("_forced_delimiter_paths") or [])
     ]
-    force_set = {_norm_path_str(x) for x in force_paths}
     committed_demoted = {
         _norm_path_str(x) for x in (st.session_state.get("_demoted_delimiter_paths") or [])
     }
     cache = st.session_state.get("_plan_scan_cache")
     if isinstance(cache, PlanScanCache) and _scan_cache_matches_session(cache):
-        files_ordered = sort_media_paths_by_name_then_mtime(list(cache.files))
-        hit_str = {_norm_path_str(h) for h in plan.delimiter_hits}
-        baseline_delims = set(cache.delimiter_candidates)
-
-        def is_d(f: Path) -> bool:
-            if f.suffix.lower() not in mbl.IMAGE_SUFFIXES:
-                return False
-            sf = _norm_path_str(f)
-            if sf in force_set:
-                return True
-            if sf in baseline_delims:
-                return True
-            pair = cache.hash_by_path.get(f)
-            if pair is not None and mbl.delimiter_match_hashes(
-                pair, cache.ref_phash, cache.ref_ahash, cache.max_hamming
-            ):
-                return True
-            return sf in hit_str
-
-        rows = [
-            (f, [])
-            for f in files_ordered
-            if is_d(f) and _norm_path_str(f) not in committed_demoted
-        ]
-        rows = _append_missing_forced_delimiter_rows(rows, force_paths, files_ordered, is_d, following_max=0)
+        files_ordered = _ordered_files_from_cache(cache)
+        paths = _step2_table_paths_from_scan_cache(
+            plan, files_ordered, cache, force_paths, committed_demoted
+        )
         return (
-            [p for p, _ in rows],
+            paths,
             "Forrás: **terv cache** + kiindulási terv (az érvényesített **nem határoló** elemek már kikerültek).",
         )
 
-    hit_str = {_norm_path_str(h) for h in plan.delimiter_hits}
-
-    def is_d_fb(f: Path) -> bool:
-        if f.suffix.lower() not in mbl.IMAGE_SUFFIXES:
-            return False
-        sf = _norm_path_str(f)
-        if sf in force_set:
-            return True
-        return sf in hit_str
-
-    rows_fb = [(f, []) for f in files if is_d_fb(f) and _norm_path_str(f) not in committed_demoted]
-    rows_fb = _append_missing_forced_delimiter_rows(
-        rows_fb, force_paths, files, is_d_fb, following_max=0
-    )
+    paths = _step2_table_paths_from_fallback(plan, files, force_paths, committed_demoted)
     return (
-        [p for p, _ in rows_fb],
+        paths,
         "Forrás: **fájllista** + kiindulási terv (hash nélkül; az érvényesített **nem határoló** elemek kikerültek).",
     )
+
+
+def get_step2_delimiter_table_paths(plan: OrganizePlan) -> tuple[list[Path], str]:
+    """2. lépés határoló-lista — session cache (pipa kattintás nem invalidál)."""
+    k = _step2_delimiter_table_cache_key(plan)
+    slot = st.session_state.get(_CACHED_STEP2_TABLE_SLOT)
+    if isinstance(slot, dict) and slot.get("key") == k:
+        return list(slot["paths"]), slot["note"]
+    paths, note = _compute_step2_delimiter_table_paths(plan)
+    st.session_state[_CACHED_STEP2_TABLE_SLOT] = {"key": k, "paths": list(paths), "note": note}
+    return paths, note
+
+
+def bust_step2_delimiter_table_cache() -> None:
+    st.session_state.pop(_CACHED_STEP2_TABLE_SLOT, None)
+
+
+def _get_delimiter_table_paths(plan: OrganizePlan) -> tuple[list[Path], str]:
+    return get_step2_delimiter_table_paths(plan)
 
 
 def _step3_demotion_skip_for_preview(plan: OrganizePlan, files_ordered: list[Path]) -> set[str]:
@@ -2529,6 +2604,7 @@ def get_step3_delimiter_preview_rows(plan: OrganizePlan) -> tuple[list[tuple[Pat
 def bust_step3_delimiter_preview_cache() -> None:
     """Gomb callback: kötelező újraszámolás a következő megjelenítéskor."""
     st.session_state.pop(_CACHED_DELIM_PREVIEW_SLOT, None)
+    bust_step2_delimiter_table_cache()
 
 
 def _render_step3_delimiter_followers_block(rows: list[tuple[Path, list[Path]]], src_note: str) -> None:
@@ -3540,7 +3616,7 @@ A forrás fájljai **fájlnév** (lexikografikusan, tipikusan időbélyeg a név
         if plan_live is None:
             _render_plan_required_notice()
         else:
-            _fragment_step2_delimiter_finalize(plan_live)
+            _render_step2_delimiter_finalize(plan_live)
 
     # A 4/5. lépés gombjai a teljes appot újrafuttatják; tab3 render gyakran a legdrágább.
     # Ezért a 4/5. lépést előbb rendereljük, így a progress UI hamarabb látszik.

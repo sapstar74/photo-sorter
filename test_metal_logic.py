@@ -488,6 +488,120 @@ def test_step2_table_paths_append_forced_outside_scan() -> None:
     assert [_norm_path_str(p) for p in paths] == [_norm_path_str(d1), _norm_path_str(forced)]
 
 
+def test_step2_table_paths_union_auto_and_forced() -> None:
+    """Kézi felvétel után is megmaradnak az automatikus határolók (N auto + M forced)."""
+    import imagehash
+
+    from organizer_metal_app import _norm_path_str, get_step2_delimiter_table_paths
+    from metal_batch_logic import OrganizePlan, PlanScanCache, norm_path_key
+    import organizer_metal_app as app_mod
+
+    root = Path("/tmp/photo_sorter_test_step2_union_auto_forced")
+    root.mkdir(parents=True, exist_ok=True)
+    auto1 = root / "01_auto.jpg"
+    auto2 = root / "02_auto.jpg"
+    manual = root / "03_manual.jpg"
+    for p in (auto1, auto2, manual):
+        p.touch()
+    files = [auto1, auto2]
+    ref = imagehash.hex_to_hash("0000000000000000")
+    source = str(root)
+    cache = PlanScanCache(
+        files=files,
+        hash_by_path={auto1: (ref, ref), auto2: (ref, ref)},
+        ref_phash=ref,
+        ref_ahash=ref,
+        max_hamming=12,
+        inner_ratio=0.92,
+        source_str=source,
+        recursive=False,
+        delimiter_candidates={norm_path_key(auto1), norm_path_key(auto2)},
+        files_sorted_by_name_mtime=True,
+        ocr_by_path={},
+    )
+    plan = OrganizePlan(segments=[], delimiter_hits=[auto1, auto2])
+    state: dict = {
+        "_plan": plan,
+        "_plan_generation": 3,
+        "_src": source,
+        "_recursive": False,
+        "metal_recursive_chk": False,
+        "metal_max_hamming": 12,
+        "metal_del_inner": 0.92,
+        "_plan_scan_cache": cache,
+        "_forced_delimiter_paths": [],
+        "_demoted_delimiter_paths": [],
+    }
+    app_mod.st.session_state = state  # type: ignore[assignment]
+
+    before, _ = get_step2_delimiter_table_paths(plan)
+    assert {_norm_path_str(p) for p in before} == {_norm_path_str(auto1), _norm_path_str(auto2)}
+
+    state["_forced_delimiter_paths"] = [str(manual)]
+    app_mod.bust_step2_delimiter_table_cache()
+    after, _ = get_step2_delimiter_table_paths(plan)
+    assert {_norm_path_str(p) for p in after} == {
+        _norm_path_str(auto1),
+        _norm_path_str(auto2),
+        _norm_path_str(manual),
+    }
+
+
+def test_step2_table_paths_hash_fallback_after_path_alias_mismatch() -> None:
+    """``/tmp`` vs ``/private/tmp``: hash cache lookup tartja meg az auto sorokat forced után is."""
+    import imagehash
+
+    from organizer_metal_app import _norm_path_str, get_step2_delimiter_table_paths
+    from metal_batch_logic import OrganizePlan, PlanScanCache, norm_path_key
+    import organizer_metal_app as app_mod
+
+    d1_private = Path("/private/tmp/photo_sorter_step2_alias/01_delim.jpg")
+    d2_private = Path("/private/tmp/photo_sorter_step2_alias/02_delim.jpg")
+    d1_tmp = Path("/tmp/photo_sorter_step2_alias/01_delim.jpg")
+    d2_tmp = Path("/tmp/photo_sorter_step2_alias/02_delim.jpg")
+    manual = Path("/tmp/photo_sorter_step2_alias/manual.jpg")
+    for p in (d1_private, manual):
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.touch()
+    d2_private.touch()
+
+    files = [d1_tmp, d2_tmp]
+    ref = imagehash.hex_to_hash("0000000000000000")
+    cache = PlanScanCache(
+        files=files,
+        hash_by_path={d1_tmp: (ref, ref), d2_tmp: (ref, ref)},
+        ref_phash=ref,
+        ref_ahash=ref,
+        max_hamming=12,
+        inner_ratio=0.92,
+        source_str="/tmp/photo_sorter_step2_alias",
+        recursive=False,
+        delimiter_candidates={norm_path_key(d1_private), norm_path_key(d2_private)},
+        files_sorted_by_name_mtime=True,
+        ocr_by_path={},
+    )
+    plan = OrganizePlan(segments=[], delimiter_hits=[d1_private, d2_private])
+    state: dict = {
+        "_plan_generation": 4,
+        "_src": "/tmp/photo_sorter_step2_alias",
+        "_recursive": False,
+        "metal_recursive_chk": False,
+        "metal_max_hamming": 12,
+        "metal_del_inner": 0.92,
+        "_plan_scan_cache": cache,
+        "_forced_delimiter_paths": [str(manual)],
+        "_demoted_delimiter_paths": [],
+    }
+    app_mod.st.session_state = state  # type: ignore[assignment]
+
+    paths, _ = get_step2_delimiter_table_paths(plan)
+    assert {_norm_path_str(p) for p in paths} == {
+        _norm_path_str(d1_tmp),
+        _norm_path_str(d2_tmp),
+        _norm_path_str(manual),
+    }
+
+
 def test_demoted_delimiter_excluded_from_preview_rows() -> None:
     from organizer_metal_app import (
         _list_delimiter_followers_fallback_from_plan,
@@ -2485,6 +2599,8 @@ if __name__ == "__main__":
     test_step2_candidate_list_filters_committed_demotions()
     test_step2_table_paths_from_scan_cache_uses_candidates()
     test_step2_table_paths_append_forced_outside_scan()
+    test_step2_table_paths_union_auto_and_forced()
+    test_step2_table_paths_hash_fallback_after_path_alias_mismatch()
     test_demoted_delimiter_excluded_from_preview_rows()
     test_demoted_paths_from_delimiter_paths()
     test_flush_pending_rerun_only_scope()

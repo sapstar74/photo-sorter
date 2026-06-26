@@ -2048,11 +2048,13 @@ def _queue_remove_forced(sp: str) -> None:
     lst = [x for x in (st.session_state.get("_forced_delimiter_paths") or []) if _norm_path_str(x) != ns]
     st.session_state["_forced_delimiter_paths"] = lst
     st.session_state["_delimiter_demotions_dirty"] = True
+    bust_step2_delimiter_table_cache()
 
 
 def _queue_clear_all_forced() -> None:
     st.session_state["_forced_delimiter_paths"] = []
     st.session_state["_delimiter_demotions_dirty"] = True
+    bust_step2_delimiter_table_cache()
 
 
 def _queue_add_forced_from_browse() -> None:
@@ -2084,6 +2086,7 @@ def _queue_add_forced_from_browse() -> None:
             added += 1
     st.session_state["_forced_delimiter_paths"] = lst
     st.session_state["_delimiter_demotions_dirty"] = True
+    bust_step2_delimiter_table_cache()
     if added == 0:
         parts = []
         if skipped_nonfile:
@@ -2120,6 +2123,7 @@ def _queue_add_forced_from_input() -> None:
     st.session_state["_manual_del_err"] = ""
     st.session_state.pop("_manual_del_info", None)
     st.session_state["_delimiter_demotions_dirty"] = True
+    bust_step2_delimiter_table_cache()
 
 
 @st.fragment
@@ -2327,24 +2331,16 @@ def _step2_table_paths_from_scan_cache(
     committed_demoted: set[str],
 ) -> list[Path]:
     """
-    Határoló útvonalak a 2. lépés táblázatához — O(darabszám) a teljes fájllista hash-bejárása helyett.
+    Határoló útvonalak a 2. lépés táblázatához — O(darabszám), hash újraszámolás nélkül.
 
-    A ``delimiter_candidates`` már tartalmazza az 1. lépés hash-találatait; csak plan hit + force kell még.
+    A ``delimiter_candidates`` + plan hit + force mellett a cache-beli ``hash_by_path`` lookup is
+    szükséges (pl. ``/tmp`` vs ``/private/tmp`` alias), különben kézi felvétel után csak a forced
+    sorok maradhatnak meg.
     """
     force_set = {_norm_path_str(x) for x in force_paths}
     hit_str = {_norm_path_str(h) for h in plan.delimiter_hits}
     baseline_delims = {_norm_path_str(x) for x in cache.delimiter_candidates}
-    delim_ns = (baseline_delims | hit_str | force_set) - committed_demoted
-
-    paths: list[Path] = []
-    seen: set[str] = set()
-    for f in files_ordered:
-        if f.suffix.lower() not in mbl.IMAGE_SUFFIXES:
-            continue
-        ns = _norm_path_str(f)
-        if ns in delim_ns and ns not in seen:
-            paths.append(f)
-            seen.add(ns)
+    hmap = cache.hash_by_path
 
     def is_d(f: Path) -> bool:
         if f.suffix.lower() not in mbl.IMAGE_SUFFIXES:
@@ -2356,9 +2352,14 @@ def _step2_table_paths_from_scan_cache(
             return True
         if sf in baseline_delims:
             return True
+        pair = hmap.get(f)
+        if pair is not None and mbl.delimiter_match_hashes(
+            pair, cache.ref_phash, cache.ref_ahash, cache.max_hamming
+        ):
+            return True
         return sf in hit_str
 
-    rows = [(p, []) for p in paths]
+    rows = [(f, []) for f in files_ordered if is_d(f)]
     rows = _append_missing_forced_delimiter_rows(
         rows, force_paths, files_ordered, is_d, following_max=0
     )

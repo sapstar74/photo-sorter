@@ -1056,9 +1056,13 @@ def execute_plan(
     output_root: Path,
     copy_mode: bool = False,
     progress: Optional[Callable[[float, Optional[str]], None]] = None,
+    use_subfolders: bool = True,
 ) -> list[tuple[str, Path, Path]]:
     """
-    Létrehozza output_root/<key>/jegyzőkönyv és fotók, mozgat/másol.
+    Létrehozza output_root/<key>/[jegyzőkönyv és fotók], mozgat/másol.
+
+    ``use_subfolders=True`` (alapértelmezés): PDF → ``jegyzőkönyv/``, kép → ``fotók/``.
+    ``use_subfolders=False``: minden fájl közvetlenül ``output_root/<key>/`` alá kerül.
 
     **Azonos jóváhagyott név = KÖZÖS mappa (összevonás):** ha több szegmens ugyanazt a
     ``folder_key`` nevet viseli (a felhasználó a 3. lépésben szándékosan azonos nevet adott),
@@ -1099,10 +1103,15 @@ def execute_plan(
         # létező közös mappába gyűlnek a fájlok; az ``unique_dest`` a fájlnév-ütközést kezeli.
         folder_name = safe_folder_name(seg.folder_key or "")
         base = output_root / folder_name
-        jegy = base / "jegyzőkönyv"
-        fotok = base / "fotók"
+        if use_subfolders:
+            jegy = base / "jegyzőkönyv"
+            fotok = base / "fotók"
+        else:
+            jegy = base
+            fotok = base
         jegy.mkdir(parents=True, exist_ok=True)
-        fotok.mkdir(parents=True, exist_ok=True)
+        if fotok != jegy:
+            fotok.mkdir(parents=True, exist_ok=True)
         for p in seg.pdfs:
             do_move(p, jegy)
         for p in seg.photos:
@@ -1110,10 +1119,15 @@ def execute_plan(
 
     if plan.unassigned_images or plan.unassigned_pdfs:
         ubase = output_root / UNASSIGNED
-        uimg = ubase / "fotók"
-        updf = ubase / "jegyzőkönyv"
+        if use_subfolders:
+            uimg = ubase / "fotók"
+            updf = ubase / "jegyzőkönyv"
+        else:
+            uimg = ubase
+            updf = ubase
         uimg.mkdir(parents=True, exist_ok=True)
-        updf.mkdir(parents=True, exist_ok=True)
+        if updf != uimg:
+            updf.mkdir(parents=True, exist_ok=True)
         for p in plan.unassigned_images:
             do_move(p, uimg)
         for p in plan.unassigned_pdfs:

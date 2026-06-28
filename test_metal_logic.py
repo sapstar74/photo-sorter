@@ -2804,6 +2804,141 @@ def test_execute_plan_includes_closing_delimiter_when_no_follower() -> None:
         assert (out / "seg_b" / "fotók" / "d2.jpg").exists()
 
 
+def test_execute_plan_with_subfolders_on_uses_fotok_jegyzokonyv() -> None:
+    """Alapértelmezés (use_subfolders=True): fotók/ és jegyzőkönyv/ almappák."""
+    from metal_batch_logic import OrganizePlan, Segment, execute_plan
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        src = root / "src"
+        out = root / "out"
+        src.mkdir(parents=True, exist_ok=True)
+
+        photo = src / "img.jpg"
+        pdf = src / "doc.pdf"
+        photo.write_bytes(b"p")
+        pdf.write_bytes(b"d")
+
+        seg = Segment(
+            folder_key="TAG1",
+            plate_image=photo,
+            ocr_raw="TAG1",
+            photos=[photo],
+            pdfs=[pdf],
+        )
+        plan = OrganizePlan(segments=[seg])
+        log = execute_plan(plan, out, copy_mode=True, use_subfolders=True)
+
+        assert (out / "TAG1" / "fotók" / "img.jpg").exists()
+        assert (out / "TAG1" / "jegyzőkönyv" / "doc.pdf").exists()
+        assert not (out / "TAG1" / "img.jpg").exists()
+        assert all("fotók" in str(dst) or "jegyzőkönyv" in str(dst) for _op, _src, dst in log)
+
+
+def test_execute_plan_without_subfolders_flat_layout() -> None:
+    """use_subfolders=False: képek és PDF-ek közvetlenül a célmappába."""
+    from metal_batch_logic import OrganizePlan, Segment, UNASSIGNED, execute_plan
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        src = root / "src"
+        out = root / "out"
+        src.mkdir(parents=True, exist_ok=True)
+
+        photo = src / "img.jpg"
+        pdf = src / "doc.pdf"
+        unimg = src / "orphan.jpg"
+        unpdf = src / "orphan.pdf"
+        for f in (photo, pdf, unimg, unpdf):
+            f.write_bytes(b"x")
+
+        seg = Segment(
+            folder_key="TAG1",
+            plate_image=photo,
+            ocr_raw="TAG1",
+            photos=[photo],
+            pdfs=[pdf],
+        )
+        plan = OrganizePlan(
+            segments=[seg],
+            unassigned_images=[unimg],
+            unassigned_pdfs=[unpdf],
+        )
+        log = execute_plan(plan, out, copy_mode=True, use_subfolders=False)
+
+        assert (out / "TAG1" / "img.jpg").exists()
+        assert (out / "TAG1" / "doc.pdf").exists()
+        assert not (out / "TAG1" / "fotók").exists()
+        assert not (out / "TAG1" / "jegyzőkönyv").exists()
+        assert (out / UNASSIGNED / "orphan.jpg").exists()
+        assert (out / UNASSIGNED / "orphan.pdf").exists()
+        assert not (out / UNASSIGNED / "fotók").exists()
+        assert all("fotók" not in str(dst) and "jegyzőkönyv" not in str(dst) for _op, _src, dst in log)
+
+
+def test_execute_plan_flat_layout_unique_dest_on_collision() -> None:
+    """Lapos elrendezésben is működik a fájlnév-ütközés feloldása."""
+    from metal_batch_logic import OrganizePlan, Segment, execute_plan
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        src = root / "src"
+        out = root / "out"
+        src.mkdir(parents=True, exist_ok=True)
+
+        p1 = src / "same.jpg"
+        p2 = src / "other.jpg"
+        p1.write_bytes(b"a")
+        p2.write_bytes(b"b")
+
+        segs = [
+            Segment(folder_key="SHARED", plate_image=p1, ocr_raw="A", photos=[p1]),
+            Segment(folder_key="SHARED", plate_image=p2, ocr_raw="B", photos=[p2]),
+        ]
+        execute_plan(OrganizePlan(segments=segs), out, copy_mode=True, use_subfolders=False)
+
+        dest_dir = out / "SHARED"
+        files = sorted(p.name for p in dest_dir.iterdir())
+        assert len(files) == 2
+        assert "same.jpg" in files
+
+
+def test_execute_plan_flat_layout_delimiter_at_following_segment() -> None:
+    """Lapos elrendezés: határoló kép a követő szegmens mappájába kerül."""
+    from metal_batch_logic import OrganizePlan, Segment, execute_plan, apply_delimiter_photo_assignments
+    from organizer_metal_app import build_delimiter_target_plate_map, _norm_path_str
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        src = root / "src"
+        out = root / "out"
+        src.mkdir(parents=True, exist_ok=True)
+
+        pA = src / "pA.jpg"
+        D1 = src / "d1.jpg"
+        pB = src / "pB.jpg"
+        for f in (pA, D1, pB):
+            f.write_bytes(b"x")
+
+        segs = [
+            Segment(folder_key="A", plate_image=pA, ocr_raw="A", photos=[pA], closed_by_delimiter=D1),
+            Segment(folder_key="B", plate_image=pB, ocr_raw="B", photos=[pB]),
+        ]
+        plan = OrganizePlan(segments=segs, delimiter_hits=[D1])
+        files = [pA, D1, pB]
+        preview = [(D1, [pB])]
+        mapping = build_delimiter_target_plate_map(plan, preview, files)
+        apply_delimiter_photo_assignments(plan.segments, plan.delimiter_hits, mapping)
+
+        plan.segments[0].folder_key = "folder_a"
+        plan.segments[1].folder_key = "folder_b"
+        execute_plan(plan, out, copy_mode=True, use_subfolders=False)
+
+        assert (out / "folder_b" / "d1.jpg").exists()
+        assert not (out / "folder_a" / "d1.jpg").exists()
+        assert _norm_path_str(D1) in {_norm_path_str(p) for p in plan.segments[1].photos}
+
+
 def test_apply_delimiter_photo_assignments_no_duplicate() -> None:
     from metal_batch_logic import Segment, apply_delimiter_photo_assignments
     from organizer_metal_app import _norm_path_str
@@ -2883,5 +3018,9 @@ if __name__ == "__main__":
     test_edited_names_consistent_no_spurious_xx_mixed_segments()
     test_execute_plan_includes_delimiter_at_following_segment()
     test_execute_plan_includes_closing_delimiter_when_no_follower()
+    test_execute_plan_with_subfolders_on_uses_fotok_jegyzokonyv()
+    test_execute_plan_without_subfolders_flat_layout()
+    test_execute_plan_flat_layout_unique_dest_on_collision()
+    test_execute_plan_flat_layout_delimiter_at_following_segment()
     test_apply_delimiter_photo_assignments_no_duplicate()
     print("OK — minden teszt sikeres")

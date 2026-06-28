@@ -3306,16 +3306,34 @@ def _render_step5_approved_folder_names_preview() -> None:
         if not distinct:
             st.info("Nincs létrehozandó mappa (nincs szegmens a tervben).")
             return
+        use_sub = bool(st.session_state.get("metal_use_subfolders", True))
+        if use_sub:
+            st.caption("Elrendezés: `<mappa>/fotók/` (képek) és `<mappa>/jegyzőkönyv/` (PDF-ek).")
+        else:
+            st.caption("Elrendezés: minden fájl közvetlenül a `<mappa>/` alá kerül (almappa nélkül).")
         for idx, (nm, cnt) in enumerate(distinct, 1):
-            if cnt > 1:
-                st.write(f"{idx}. `{nm}`  —  {cnt} szegmens összevonva")
+            if use_sub:
+                path_hint = f"`{nm}/fotók/` + `{nm}/jegyzőkönyv/`"
             else:
-                st.write(f"{idx}. `{nm}`")
+                path_hint = f"`{nm}/`"
+            if cnt > 1:
+                st.write(f"{idx}. {path_hint}  —  {cnt} szegmens összevonva")
+            else:
+                st.write(f"{idx}. {path_hint}")
 
 
 def _render_step5_execute_block() -> None:
     st.subheader("5. Képek válogatásának indítása")
     st.checkbox("Másolás (kikapcsolva: áthelyezés)", key="metal_copy_mode", value=False)
+    st.checkbox(
+        "Almappák használata (fotók / jegyzőkönyv)",
+        key="metal_use_subfolders",
+        value=True,
+        help=(
+            "Bekapcsolva: a képek a ``fotók/``, a PDF-ek a ``jegyzőkönyv/`` almappába kerülnek "
+            "minden célmappán belül. Kikapcsolva: minden fájl közvetlenül a megadott mappába megy."
+        ),
+    )
     st.checkbox(
         "TAG nélküli fájlok is menjenek a cél `_nincs_köteg` alá",
         key="metal_move_unassigned",
@@ -3418,7 +3436,14 @@ def _render_step5_execute_block() -> None:
                 exec_bar.progress(f, text=label)
                 exec_status.caption(label)
 
-            log = execute_plan(plan, out_root, copy_mode=copy_mode, progress=_exec_progress)
+            use_subfolders = bool(st.session_state.get("metal_use_subfolders", True))
+            log = execute_plan(
+                plan,
+                out_root,
+                copy_mode=copy_mode,
+                progress=_exec_progress,
+                use_subfolders=use_subfolders,
+            )
             if _step5_debug_enabled():
                 try:
                     created_dirs = sorted(

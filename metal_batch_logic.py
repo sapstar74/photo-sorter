@@ -1019,6 +1019,38 @@ def allocate_unique_folder_name(folder_key: str, used: set[str], *, max_len: int
     return cand
 
 
+def apply_delimiter_photo_assignments(
+    segments: list[Segment],
+    delimiter_hits: Iterable[Path],
+    delim_to_plate: dict[str, Path],
+    *,
+    excluded: Optional[set[str]] = None,
+) -> None:
+    """
+    A határoló képeket a cél szegmens ``photos`` listájába teszi (a 5. lépés másolásához).
+
+    ``delim_to_plate``: normalizált határoló-útvonal → a cél szegmens ``plate_image``-je
+    (a 3. lépés határoló-sor párosítása szerint; záró határolónál a lezárt szegmens).
+    A határoló a lista elejére kerül; ha már benne van, nem duplikál.
+    """
+    skip = excluded or set()
+    plate_to_seg = {norm_path_key(s.plate_image): s for s in segments}
+    for delim in delimiter_hits:
+        dn = norm_path_key(delim)
+        if dn in skip:
+            continue
+        plate = delim_to_plate.get(dn)
+        if plate is None:
+            continue
+        seg = plate_to_seg.get(norm_path_key(plate))
+        if seg is None:
+            continue
+        existing = {norm_path_key(p) for p in seg.photos}
+        if dn in existing:
+            continue
+        seg.photos.insert(0, delim)
+
+
 def execute_plan(
     plan: OrganizePlan,
     output_root: Path,

@@ -2708,6 +2708,116 @@ def test_edited_names_consistent_no_spurious_xx_mixed_segments() -> None:
     assert "KEZI-xx" not in approved
 
 
+def test_execute_plan_includes_delimiter_at_following_segment() -> None:
+    """
+    5. lépés: a határoló kép a 3. lépés párosítása szerint a követő szegmens ``fotók/``
+    mappájába kerül (nem marad ki a ``seg.photos``-ból).
+    """
+    from metal_batch_logic import OrganizePlan, Segment, execute_plan, apply_delimiter_photo_assignments
+    from organizer_metal_app import build_delimiter_target_plate_map, _norm_path_str
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        src = root / "src"
+        out = root / "out"
+        src.mkdir(parents=True, exist_ok=True)
+
+        pA = src / "pA.jpg"
+        D1 = src / "d1.jpg"
+        pB = src / "pB.jpg"
+        for f in (pA, D1, pB):
+            f.write_bytes(b"x")
+
+        segs = [
+            Segment(
+                folder_key="1",
+                plate_image=pA,
+                ocr_raw="A",
+                photos=[pA],
+                closed_by_delimiter=D1,
+            ),
+            Segment(
+                folder_key="2",
+                plate_image=pB,
+                ocr_raw="B",
+                photos=[pB],
+                closed_by_delimiter=None,
+            ),
+        ]
+        plan = OrganizePlan(segments=segs, delimiter_hits=[D1])
+        files = [pA, D1, pB]
+        preview = [(D1, [pB])]
+
+        mapping = build_delimiter_target_plate_map(plan, preview, files)
+        apply_delimiter_photo_assignments(plan.segments, plan.delimiter_hits, mapping)
+
+        assert _norm_path_str(D1) in {_norm_path_str(p) for p in plan.segments[1].photos}
+        assert _norm_path_str(D1) not in {_norm_path_str(p) for p in plan.segments[0].photos}
+
+        plan.segments[0].folder_key = "folder_a"
+        plan.segments[1].folder_key = "folder_b"
+        log = execute_plan(plan, out, copy_mode=True)
+
+        copied = {src.name for _op, src, _dst in log}
+        assert "d1.jpg" in copied
+        assert (out / "folder_b" / "fotók" / "d1.jpg").exists()
+        assert (out / "folder_a" / "fotók" / "d1.jpg").exists() is False
+
+
+def test_execute_plan_includes_closing_delimiter_when_no_follower() -> None:
+    """Záró határoló (nincs követő szegmens): a lezárt szegmens ``fotók/`` mappájába kerül."""
+    from metal_batch_logic import OrganizePlan, Segment, execute_plan, apply_delimiter_photo_assignments
+    from organizer_metal_app import build_delimiter_target_plate_map, _norm_path_str
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        src = root / "src"
+        out = root / "out"
+        src.mkdir(parents=True, exist_ok=True)
+
+        pA = src / "pA.jpg"
+        D1 = src / "d1.jpg"
+        D2 = src / "d2.jpg"
+        pB = src / "pB.jpg"
+        for f in (pA, D1, pB, D2):
+            f.write_bytes(b"x")
+
+        segs = [
+            Segment(folder_key="A", plate_image=pA, ocr_raw="A", photos=[pA], closed_by_delimiter=D1),
+            Segment(folder_key="B", plate_image=pB, ocr_raw="B", photos=[pB], closed_by_delimiter=D2),
+        ]
+        plan = OrganizePlan(segments=segs, delimiter_hits=[D1, D2])
+        files = [pA, D1, pB, D2]
+        preview = [(D1, [pB]), (D2, [])]
+
+        mapping = build_delimiter_target_plate_map(plan, preview, files)
+        apply_delimiter_photo_assignments(plan.segments, plan.delimiter_hits, mapping)
+
+        assert _norm_path_str(D1) in {_norm_path_str(p) for p in plan.segments[1].photos}
+        assert _norm_path_str(D2) in {_norm_path_str(p) for p in plan.segments[1].photos}
+
+        plan.segments[0].folder_key = "seg_a"
+        plan.segments[1].folder_key = "seg_b"
+        execute_plan(plan, out, copy_mode=True)
+
+        assert (out / "seg_b" / "fotók" / "d1.jpg").exists()
+        assert (out / "seg_b" / "fotók" / "d2.jpg").exists()
+
+
+def test_apply_delimiter_photo_assignments_no_duplicate() -> None:
+    from metal_batch_logic import Segment, apply_delimiter_photo_assignments
+    from organizer_metal_app import _norm_path_str
+
+    root = Path("/tmp/photo_sorter_delim_dedup")
+    d = root / "d.jpg"
+    p = root / "p.jpg"
+    seg = Segment(folder_key="x", plate_image=p, ocr_raw="x", photos=[d, p], closed_by_delimiter=d)
+    mapping = {_norm_path_str(d): p}
+    apply_delimiter_photo_assignments([seg], [d], mapping)
+    assert len(seg.photos) == 2
+    assert seg.photos[0].name == "d.jpg"
+
+
 if __name__ == "__main__":
     test_sort_by_name_then_mtime()
     test_safe_folder_name()
@@ -2771,4 +2881,7 @@ if __name__ == "__main__":
     test_leading_delimiterless_folder_rename_reaches_execution()
     test_step5_name_edit_changes_executed_destination()
     test_edited_names_consistent_no_spurious_xx_mixed_segments()
+    test_execute_plan_includes_delimiter_at_following_segment()
+    test_execute_plan_includes_closing_delimiter_when_no_follower()
+    test_apply_delimiter_photo_assignments_no_duplicate()
     print("OK — minden teszt sikeres")

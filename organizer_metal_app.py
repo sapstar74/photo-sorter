@@ -34,6 +34,7 @@ from metal_batch_logic import (
     OrganizePlan,
     PlanScanCache,
     Segment,
+    apply_delimiter_photo_assignments,
     build_plan,
     execute_plan,
     folder_path_error_message,
@@ -2745,6 +2746,49 @@ def _segment_index_for_closing_delimiter(plan: OrganizePlan, delim: Path) -> int
     return None
 
 
+def build_delimiter_target_plate_map(
+    plan: OrganizePlan,
+    preview_rows: list[tuple[Path, list[Path]]],
+    files_ord: list[Path] | None,
+) -> dict[str, Path]:
+    """
+    Határoló → cél szegmens ``plate_image`` (a 3. lépés megjelenítési párosítása).
+
+    Először a határoló **utáni** (követő) szegmens nyer; ha nincs (záró / egymás utáni határoló),
+    visszaesés a határoló által **lezárt** szegmensre.
+    """
+    out: dict[str, Path] = {}
+    npr = len(preview_rows)
+    for dix, (delim, followers) in enumerate(preview_rows):
+        nd_next = preview_rows[dix + 1][0] if dix + 1 < npr else None
+        si = _segment_index_for_tag_block(
+            plan,
+            delim,
+            followers,
+            next_delimiter=nd_next,
+            files_ordered=files_ord,
+        )
+        if si is not None:
+            out[_norm_path_str(delim)] = plan.segments[si].plate_image
+    for delim in plan.delimiter_hits:
+        dn = _norm_path_str(delim)
+        if dn in out:
+            continue
+        csi = _segment_index_for_closing_delimiter(plan, delim)
+        if csi is not None:
+            out[dn] = plan.segments[csi].plate_image
+    return out
+
+
+def _collect_execution_excluded_paths() -> set[str]:
+    """4. lépés multiselect: kihagyandó fájlok (határolók is, ha kijelölve)."""
+    skip: set[str] = set()
+    for k, v in st.session_state.items():
+        if isinstance(k, str) and k.startswith("exc_sel_") and isinstance(v, list):
+            skip.update(str(x) for x in v)
+    return skip
+
+
 def _segment_index_for_tag_block(
     plan: OrganizePlan,
     delim: Path,
@@ -3302,6 +3346,10 @@ def _render_step5_execute_block() -> None:
             exec_bar.progress(0.08, text="Előkészítés: kihagyások és cél beállítása…")
             exec_status.caption("Előkészítés: kihagyások és cél beállítása…")
             plan = _apply_photo_exclusions_to_plan(plan)
+            preview_rows, _ = get_step3_delimiter_preview_rows(plan)
+            files_ord = _get_step3_ordered_media_files(plan)
+            delim_plate_map = build_delimiter_target_plate_map(plan, preview_rows, files_ord)
+            excluded_paths = _collect_execution_excluded_paths()
             # Központi szerződés: a határolós szegmensek + a kézzel átnevezett, határoló nélküli
             # szegmensek mindig bekerülnek a végrehajtási tervbe (a határoló nélküli, át nem
             # nevezett szegmensek viselkedése változatlan: alapból bennmaradnak).
@@ -3316,6 +3364,13 @@ def _render_step5_execute_block() -> None:
                 )
             except Exception:
                 pass
+
+            apply_delimiter_photo_assignments(
+                plan.segments,
+                plan.delimiter_hits,
+                delim_plate_map,
+                excluded=excluded_paths,
+            )
 
             # Explicit, jóváhagyott mappanév-lista: kézi név (a stabil tárból), ha van; különben
             # garantáltan egyedi sorszám. A tárat adjuk át, hogy az érintetlen mappák SOHA ne
